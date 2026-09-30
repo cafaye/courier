@@ -44,3 +44,16 @@ config :courier, Oban, testing: :manual
 # process, so a test can assert on what would have gone to NATS. The Gnat
 # connection is a later packet.
 config :courier, :nats_publisher, Courier.NatsPublisher.Noop
+
+# A fixed sealing key, so a test can assert that a secret is *not* readable from
+# the column without the assertion depending on which key the process booted
+# with. Test-only: `config/runtime.exs` requires a real one from the environment
+# and refuses to boot without it, and this value is in the repository.
+config :courier, :secret_box_key, "Y291cmllci10ZXN0LW9ubHkta2V5LTMyLWJ5dGVzISE="
+
+# The SSRF guard's resolver in test. `Courier.TestSupport.TestDns` answers from
+# a table a test writes, so every URL in the suite — including ones pointing at
+# `127.0.0.1` — is checked without a DNS lookup whose answer could differ
+# between a laptop and CI. `{module, argument}` is the guard's convention for a
+# resolver that needs to be told something.
+config :courier, :dns_resolver, {Courier.TestSupport.TestDns, {:canned, ["93.184.216.34"]}}

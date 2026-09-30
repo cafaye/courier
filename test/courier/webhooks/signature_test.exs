@@ -289,28 +289,53 @@ defmodule Courier.Webhooks.SignatureTest do
 
     test "rejects a timestamp older than the tolerance" do
       signing_secret = secret()
-      stale = (now() - @tolerance - 1) |> Integer.to_string()
+      at = now()
+      stale = (at - @tolerance - 1) |> Integer.to_string()
       headers = Signature.headers(signing_secret, @spec_id, stale, @spec_body)
 
-      assert Verifier.verify(@spec_body, headers, signing_secret) ==
+      assert Verifier.verify(@spec_body, headers, signing_secret, now: at) ==
                {:error, :timestamp_out_of_tolerance}
     end
 
     test "rejects a timestamp further ahead than the tolerance" do
       signing_secret = secret()
-      ahead = (now() + @tolerance + 1) |> Integer.to_string()
+      at = now()
+      ahead = (at + @tolerance + 1) |> Integer.to_string()
       headers = Signature.headers(signing_secret, @spec_id, ahead, @spec_body)
 
-      assert Verifier.verify(@spec_body, headers, signing_secret) ==
+      assert Verifier.verify(@spec_body, headers, signing_secret, now: at) ==
                {:error, :timestamp_out_of_tolerance}
     end
 
     test "accepts a timestamp exactly at the tolerance, because the window is inclusive" do
       signing_secret = secret()
-      edge = (now() - @tolerance) |> Integer.to_string()
+      # `now` is captured once and passed to the verifier. Reading the clock twice
+      # would let the second reading land a second later and turn a boundary case
+      # into a failure that has nothing to do with the boundary — a test that only
+      # passes when the suite is fast.
+      at = now()
+      edge = (at - @tolerance) |> Integer.to_string()
       headers = Signature.headers(signing_secret, @spec_id, edge, @spec_body)
 
-      assert Verifier.verify(@spec_body, headers, signing_secret) == :ok
+      assert Verifier.verify(@spec_body, headers, signing_secret, now: at) == :ok
+    end
+
+    test "rejects a timestamp one second past the tolerance" do
+      signing_secret = secret()
+      at = now()
+      edge = (at - @tolerance - 1) |> Integer.to_string()
+      headers = Signature.headers(signing_secret, @spec_id, edge, @spec_body)
+
+      assert Verifier.verify(@spec_body, headers, signing_secret, now: at) ==
+               {:error, :timestamp_out_of_tolerance}
+    end
+
+    test "the tolerance is five minutes, the window every reference library uses" do
+      # The spec §Verifying signatures asks for "some allowable tolerance" and does
+      # not name a number. `refs/standard-webhooks/libraries/` uses 300s in every
+      # implementation, and courier publishes the same window so a customer can
+      # point an official library at a courier webhook and get the same answer.
+      assert Verifier.tolerance() == 300
     end
 
     test "rejects a timestamp that is not an integer" do

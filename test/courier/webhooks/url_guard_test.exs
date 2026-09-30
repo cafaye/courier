@@ -21,13 +21,7 @@ defmodule Courier.Webhooks.UrlGuardTest do
   use ExUnit.Case, async: true
 
   alias Courier.TestSupport.TestDns
-  alias Courier.Webhooks.Dns
   alias Courier.Webhooks.UrlGuard
-
-  # A public address a test can claim a hostname resolves to. It is outside every
-  # blocked range and is not a documentation range, so no expectation in this
-  # file depends on the example.com ranges being allowed.
-  @public "8.8.8.8"
 
   # The resolver for cases about the URL alone. It answers one public address for
   # any name, so a hostname case never reaches the network and a literal-address
