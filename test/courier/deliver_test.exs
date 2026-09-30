@@ -34,6 +34,10 @@ defmodule Courier.DeliverTest do
     )
   end
 
+  # Read with no `order_by`, deliberately — see the assertion at the end of
+  # "every type courier sends". courier promises what each row *is*, not what
+  # order the database hands rows back in, so nothing here may depend on the
+  # second one.
   defp outbox, do: Repo.all(OutboxEvent)
 
   describe "welcome" do
@@ -125,8 +129,16 @@ defmodule Courier.DeliverTest do
       assert reset.notification_type == "password_reset"
       assert invitation.notification_type == "team_invitation"
 
-      assert Enum.map(outbox(), & &1.data["notification_type"]) ==
-               ~w(welcome password_reset team_invitation)
+      # Sorted on both sides, and that is the whole point of this assertion. What
+      # courier promises is that each of the three sends recorded a row under its
+      # own notification type — a set of three, one per type. `outbox/0` reads
+      # with no `ORDER BY`, so the order rows come back in is PostgreSQL's choice
+      # and not a contract; comparing sequences here asserted an ordering nobody
+      # promised and failed in roughly one run in eight. Sorting keeps the
+      # assertion exactly as strong (all three types present, each exactly once,
+      # nothing else) while dropping the part that was never courier's promise.
+      assert outbox() |> Enum.map(& &1.data["notification_type"]) |> Enum.sort() ==
+               Enum.sort(~w(welcome password_reset team_invitation))
     end
 
     test "a password reset and a team invitation are different messages" do

@@ -16,7 +16,7 @@
 #
 #   1. A database. `mix test` in courier is aliased to
 #      `ecto.create ++ ecto.migrate ++ test` (mix.exs), so a runner with no
-#      postgres aborts *before the first test executes*: 0 of 488 run, exit 1.
+#      postgres aborts *before the first test executes*: 0 of 616 run, exit 1.
 #      A caller cannot hand a reusable workflow a service container — GitHub
 #      allows only `name`, `uses`, `with`, `secrets`, `strategy`, `needs`, `if`,
 #      `concurrency` and `permissions` on a job that calls one, so `services:`

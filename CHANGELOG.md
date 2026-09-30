@@ -78,6 +78,23 @@ document lands in both files in one commit, because core asserts the two agree.
     database uncast and matches nothing against a `utc_datetime_usec` column —
     measured as 1 row by raw SQL and 0 rows by the query, against the same table.
     Every query in `Courier.Idempotency` uses the `where([k], ...)` macro form.
+- **Six tests in `webhook_endpoints_test.exs` and `webhook_endpoints_config_test.exs`
+  that could only pass while the rest of the suite left no rows behind.** Each
+  asserted `Repo.aggregate(WebhookEndpoint, :count) == 0` — a claim about every
+  other test in the repository as much as about `Courier.WebhookEndpoints`, green
+  only while nothing else had ever written a row and red the moment one was
+  visible. Each of the six now mints its own account and counts only that
+  account's rows, which is the assertion the test means: *this* call wrote
+  nothing. No assertion was weakened, no test made slower, and no `async: false`
+  added — the ordering dependency is gone rather than scheduled around.
+- **`deliver_test.exs` compared two lists whose order the database does not
+  promise.** `Repo.all(OutboxEvent)` carries no `order_by`, so the row order is
+  PostgreSQL's choice; the assertion compared it against a fixed sequence and
+  failed in 2 of 50 whole-suite runs with
+  `["password_reset", "welcome", "team_invitation"]` where it expected
+  `~w(welcome password_reset team_invitation)`. Both sides are sorted now, which
+  keeps the assertion exactly as strong (all three types present, each once,
+  nothing else) and stops it testing the server's whim.
 
 
 courier can send a transactional mail, honour what the user asked not to receive,

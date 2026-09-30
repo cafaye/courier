@@ -157,15 +157,28 @@ two can disagree, one of them is lying. The workflow adds a database, the tier
 counts and the lockfile guard *around* that command; it does not reimplement it.
 
 **A tier that CI cannot name is a tier nobody ran.** The suite partitions
-exactly, by the case template: 194 tests in the 10 files that never touch
-`Courier.Repo`, 294 in the 16 that do, and `mix test` is aliased to
-`ecto.create` first, so a runner with no database executes *zero* of the 488 —
+exactly, by the case template: 258 tests in the 12 files that never touch
+`Courier.Repo`, 358 in the 19 that do, and `mix test` is aliased to
+`ecto.create` first, so a runner with no database executes *zero* of the 616 —
 SSRF table included. Both counts are asserted in CI by `bin/assert-suite`, and
 the SSRF table gets its own 62-test run so the log carries a line that can only
 exist if that harness ran. **When you add or delete a test, raise the floor in
 `.github/workflows/ci.yml` in the same commit.** Deleting a test to make CI green
 is caught by the floor; adding one is caught because CI goes red until you raise
 it. Both are one-line diffs, and only one of them changes what courier verifies.
+
+**A test asserts about its own rows, never about the table's.** A count over the
+whole table — `Repo.aggregate(WebhookEndpoint, :count) == 0` — is a claim about
+every other test in the repository as much as about the code under test: it is
+green only while nothing else has ever written a row, and red the moment one is
+visible. That is the *test-level* shape of the tenant-isolation weakness D18
+tracks, and it failed in about one run in nine until courier-15 gave each of the
+six affected tests its own tenancy key and counted only its own account's rows.
+The rule generalises past those six: **mint an account per test that needs to
+assert nothing was written, and count that account.** The same reasoning covers
+reads: a `Repo.all/1` with no `order_by` returns rows in PostgreSQL's order, not
+insertion order, so an assertion that compares two lists must sort both sides
+before it is a claim about courier rather than about the server's whim.
 
 **The toolchain is pinned in `mise.toml` and nowhere else.** `bin/toolchain-pins`
 is how CI reads it, so the workflow cannot disagree with the worktree; the one
