@@ -63,3 +63,10 @@ config :courier, :dns_resolver, {Courier.TestSupport.TestDns, {:canned, ["93.184
 # assertions about courier and not about a listener's timing. See
 # `test/support/recording_sender.ex`.
 config :courier, :webhook_sender, Courier.TestSupport.RecordingSender
+
+# The principal resolver in test. It reads the account from a request header so
+# the authorization matrix can be asserted over real requests; it is a stand-in
+# for identity's JWT verifier and is only ever configured here. The shipped
+# default, `Courier.Principal.Reject`, authenticates nobody — see
+# `lib/courier_web/plugs/principal.ex`.
+config :courier, :principal, Courier.TestSupport.HeaderResolver

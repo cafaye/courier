@@ -126,6 +126,106 @@ defmodule Courier.WebhookEndpoints do
     |> Repo.all()
   end
 
+  # Core's openapi-conventions: "Cursor-based everywhere… `limit` defaults to 25
+  # and is capped at 100. `cursor` is an opaque base64url string; clients must not
+  # parse it, and its encoding may change without notice."
+  @default_limit 25
+  @max_limit 100
+
+  @doc false
+  def default_limit, do: @default_limit
+  @doc false
+  def max_limit, do: @max_limit
+
+  @doc """
+  One page of `account_id`'s endpoints, oldest first.
+
+  Returns `{:ok, %{data: endpoints, page: page}}`, or `{:error, :invalid_cursor}`
+  for a cursor courier did not issue. The cursor is the base64url of the last id
+  on the previous page and is compared as a *lower bound* against
+  `(inserted_at, id)`, so a page boundary is stable while new endpoints are being
+  created — an offset would skip or repeat rows as the table grows under it.
+  """
+  @spec page(Ecto.UUID.t(), pos_integer() | nil, String.t() | nil) ::
+          {:ok, map()} | {:error, :invalid_cursor}
+  def page(account_id, limit, cursor) do
+    with {:ok, limit} <- validate_limit(limit),
+         {:ok, after_row} <- decode_cursor(cursor) do
+      query =
+        WebhookEndpoint
+        |> where([endpoint], endpoint.account_id == ^account_id)
+        |> order_by([endpoint], asc: endpoint.inserted_at, asc: endpoint.id)
+        |> limit(^Kernel.+(limit, 1))
+
+      # `limit + 1` rows is how `has_more` is answered without a second query: ask
+      # for one more than was asked for, and if it arrives there is another page.
+      rows = query |> after_row(after_row) |> Repo.all()
+      has_more? = length(rows) > limit
+      page = Enum.take(rows, limit)
+
+      {:ok,
+       %{
+         data: page,
+         page: %{
+           next_cursor: if(has_more?, do: encode_cursor(List.last(page)), else: nil),
+           has_more: has_more?
+         }
+       }}
+    end
+  end
+
+  defp after_row(query, nil), do: query
+
+  defp after_row(query, {inserted_at, id}) do
+    where(
+      query,
+      [endpoint],
+      {endpoint.inserted_at, endpoint.id} > {^inserted_at, ^id}
+    )
+  end
+
+  defp validate_limit(nil), do: {:ok, @default_limit}
+
+  defp validate_limit(limit) when is_integer(limit) do
+    {:ok, min(limit, @max_limit)}
+  end
+
+  defp validate_limit(limit) when is_binary(limit) do
+    case Integer.parse(limit) do
+      {parsed, ""} when parsed > 0 -> {:ok, min(parsed, @max_limit)}
+      _not_a_positive_integer -> {:error, :invalid_limit}
+    end
+  end
+
+  defp validate_limit(_limit), do: {:error, :invalid_limit}
+
+  # Opaque to the client, per core: the encoding is courier's and may change. What
+  # it has to carry is the row's position, because the comparison is a lower bound
+  # on `(inserted_at, id)` rather than an offset.
+  #
+  # The timestamp goes in as ISO 8601 rather than as a `DateTime` struct, because
+  # `Jason.encode!/1` on a struct writes its `Inspect` representation — which is not
+  # what `DateTime.from_iso8601/1` reads back. A cursor that does not survive its
+  # own round trip is a cursor that 422s on the second page of every list.
+  defp encode_cursor(%WebhookEndpoint{} = endpoint) do
+    [DateTime.to_iso8601(endpoint.inserted_at), endpoint.id]
+    |> Jason.encode!()
+    |> Base.url_encode64(padding: false)
+  end
+
+  defp decode_cursor(nil), do: {:ok, nil}
+
+  defp decode_cursor(cursor) when is_binary(cursor) do
+    with {:ok, decoded} <- Base.url_decode64(cursor, padding: false),
+         {:ok, [iso8601, id]} <- Jason.decode(decoded),
+         {:ok, inserted_at, 0} <- DateTime.from_iso8601(iso8601),
+         {:ok, id} <- Ecto.UUID.cast(id) do
+      {:ok, {inserted_at, id}}
+    else
+      _not_a_cursor_courier_issued -> {:error, :invalid_cursor}
+    end
+  end
+
   @doc """
   Changes an endpoint.
 
