@@ -1,0 +1,5 @@
+<p><%= @greeting %></p>
+<p>Welcome aboard. Confirm your address and you are in.</p>
+<%= if @url do %>
+<p><a href="<%= @url %>">Confirm your email address</a></p>
+<% end %>

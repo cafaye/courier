@@ -32,10 +32,12 @@ core: ^0.1.0
 # example manifests agree in both directions. They are declared here so courier's
 # own manifest says the same thing core does.
 #
-# None of them is emitted yet. This is a v0 scaffold: there is no Swoosh, no
-# provider, no Oban, no queue. Emitting `email.queued` is Phase 3 work, and
-# these lines are its checklist — the event envelope is validated against
-# `core/schemas/event-envelope.schema.json` in a contract test when that lands.
+# `email.delivered` is emitted: `Courier.Deliver` writes it to `outbox_events` in
+# the same transaction as the send and `Courier.Workers.ProcessOutboxWorker`
+# relays it; `Courier.EventsTest` checks this list against
+# `Courier.Events.types()`. The other four are declared and not yet emitted — a
+# catalog entry is a promise, not a claim. `email.bounced` and `email.complained`
+# need a provider webhook, which is a later packet.
 exposes:
   events:
     - email.queued

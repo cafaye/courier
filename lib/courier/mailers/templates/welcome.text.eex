@@ -1,0 +1,6 @@
+<%= @greeting %>
+
+Welcome aboard. Confirm your address and you are in.
+<%= if @url do %>
+Confirm your email address: <%= @url %>
+<% end %>

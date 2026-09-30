@@ -23,6 +23,35 @@ end
 config :courier, CourierWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+# The From address of every transactional email is deployment configuration:
+# an operator sets MAIL_FROM / MAIL_FROM_NAME and redeploys, nobody commits a
+# changed address. Subjects stay in config/config.exs — they are product copy,
+# not infrastructure. Reading the address from the environment here (rather than
+# in `Courier.Mailers`) is deliberate: runtime.exs runs once at boot.
+#
+# This block, and the adapter below it, are prod-only on purpose. runtime.exs
+# runs in every environment *after* the env-specific files, so anything set
+# outside `if config_env() == :prod` here would silently override test.exs — and
+# a developer's stray MAIL_FROM would change what `mix test` mails.
+if config_env() == :prod do
+  mailing = Application.get_env(:courier, :mailing, [])
+  {from_name, from_address} = mailing[:from]
+
+  config :courier,
+         :mailing,
+         Keyword.merge(mailing,
+           from:
+             {System.get_env("MAIL_FROM_NAME", from_name),
+              System.get_env("MAIL_FROM", from_address)}
+         )
+
+  # No provider adapter ships in this packet. The Local adapter renders into
+  # memory and returns a provider-shaped message id, so a released courier
+  # exercises the whole pipeline without mailing anyone; the provider packet
+  # replaces this line with the provider adapter and its credentials.
+  config :courier, Courier.Mailer, adapter: Swoosh.Adapters.Local
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

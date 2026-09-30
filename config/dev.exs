@@ -61,3 +61,9 @@ config :phoenix, :stacktrace_depth, 20
 
 # Initialize plugs at runtime for faster development compilation
 config :phoenix, :plug_init_mode, :runtime
+
+# Transactional email in dev goes to the Local adapter: it renders into memory,
+# returns a provider-shaped message id, and never opens a socket. Dev cannot
+# accidentally mail a real person. The Swoosh preview plug is deliberately not
+# wired — courier has no HTML layer to preview into.
+config :courier, Courier.Mailer, adapter: Swoosh.Adapters.Local

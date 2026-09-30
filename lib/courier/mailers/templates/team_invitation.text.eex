@@ -1,0 +1,7 @@
+<%= @greeting %>
+
+<%= @invited_by %> invited you to join <%= @account_name %> as <%= @role %>.
+
+Accept the invitation: <%= @url %>
+
+If you were not expecting this, ignore this message and nothing has changed.

@@ -29,3 +29,18 @@ config :phoenix, :plug_init_mode, :runtime
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Transactional email in test goes to `Swoosh.Adapters.Test`, which hands the
+# message to the process that sent it. That is what makes `assert_email_sent/1`
+# (Swoosh.TestAssertions) work without a provider, a relay, or a socket.
+config :courier, Courier.Mailer, adapter: Swoosh.Adapters.Test
+
+# Oban in `:manual` testing mode: jobs land in the database, nothing executes in
+# the background. Both modes also silence plugin queries, which is what keeps the
+# Ecto sandbox usable (guides/testing/testing.md).
+config :courier, Oban, testing: :manual
+
+# The relay publishes to a stand-in that hands each envelope back to the calling
+# process, so a test can assert on what would have gone to NATS. The Gnat
+# connection is a later packet.
+config :courier, :nats_publisher, Courier.NatsPublisher.Noop

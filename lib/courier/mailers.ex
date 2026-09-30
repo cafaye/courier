@@ -1,0 +1,252 @@
+defmodule Courier.Mailers do
+  @moduledoc """
+  courier composes mail. It does not send it (`Courier.Mailer` does), store it,
+  or model users — the payload arrives already keyed the way the platform keys
+  its events, and courier renders it.
+
+      iex> build(:welcome, %{user_id: id, email: "kaka@example.com", name: "Kaka", url: url})
+      {:ok, %Swoosh.Email{}}
+
+  `build/2` returns the message rather than sending it, which is the seam that
+  keeps Swoosh out of the assertions: a built email can be read field by field,
+  with no adapter, no mailbox, and no network. `deliver/2` is `build/2` plus
+  `Courier.Mailer.deliver/1`.
+
+  ## The three types
+
+  `welcome`, `password_reset`, and `team_invitation` are courier's whole
+  catalog — the same three the platform triggers. Each has its own required
+  fields, and each says so:
+
+  | type             | required                                |
+  | ---------------- | --------------------------------------- |
+  | `welcome`        | `email`                                 |
+  | `password_reset` | `email`, `url`                          |
+  | `team_invitation`| `email`, `url`, `account_name`, `invited_by` |
+
+  A payload courier cannot send is `{:error, {:invalid_payload, changeset}}`
+  rather than a mail with a hole in it: a reset mail with no link, or an
+  invitation with nobody to attribute it to, is noise in a person's inbox.
+
+  ## Configuration
+
+  The sender and the subject lines are configuration
+  (`config :courier, :mailing`, with the address overridden from the
+  environment in `config/runtime.exs`), because they are the two things an
+  operator should be able to reword without touching a module. Subjects are
+  templates with `%{key}` placeholders filled from the payload.
+
+  Both are reported as their own errors rather than as a malformed mail: a
+  subject template naming a key the payload does not carry
+  (`:subject_misconfigured`) or an unconfigured sender
+  (`:from_not_configured`) is a deployment that is wrong, not a request that is
+  wrong, and the two must not be confused in an operator's logs.
+
+  ## Templates
+
+  Bodies are `EEx` templates under `lib/courier/mailers/templates/`, compiled at
+  build time by `Courier.Mailers.Templates` and wrapped in one shared layout per
+  format, so every email courier sends is wrapped alike. They are not HEEx: this
+  repository's dependency list has no HEEx engine (`phoenix_template` 1.1 with no
+  LiveView, no `phoenix_component`), and AGENTS.md's rule is that a dependency is
+  not added "just to prepare". The trade is explicit rather than hidden: the one
+  free-text field per message, the recipient's `name`, is escaped where it enters
+  the template assigns (`Plug.HTML.html_escape/1`), because plain EEx
+  interpolates what it is given.
+  """
+
+  import Ecto.Changeset
+
+  alias Courier.Mailer
+  alias Courier.Mailers.Templates
+
+  @typedoc "The notification types courier sends, and no others."
+  @type type :: String.t()
+
+  @fields ~w(user_id email name url account_name invited_by role)a
+  @payload_types Map.new(@fields, &{&1, :string})
+  @types ~w(welcome password_reset team_invitation)
+
+  @doc """
+  Every notification type courier sends, in the order the platform names them.
+
+  This list is also `Courier.NotificationPreferences`' catalog and the `events`
+  in `cafaye.yml`; a new entry here is a row in the manifest in the same commit.
+  """
+  @spec types() :: [type()]
+  def types, do: @types
+
+  @doc """
+  The user a payload is about, or `nil` when it names none.
+
+  `Courier.Deliver` needs it for the preference check and for the event's
+  `user_id`; courier does not own users, so a payload with no user is a case
+  courier refuses rather than one it invents an id for.
+  """
+  @spec user_id(map()) :: String.t() | nil
+  def user_id(payload) when is_map(payload), do: payload |> normalize() |> Map.get(:user_id)
+
+  @doc """
+  Builds the message for `type` and `payload` without sending it.
+
+  Returns `{:ok, email}`, or one of:
+
+    * `{:error, :unknown_notification_type}` — courier has no such message
+    * `{:error, {:invalid_payload, changeset}}` — the payload cannot be sent
+    * `{:error, :from_not_configured}` — no sender is configured
+    * `{:error, :subject_misconfigured}` — no subject, or a subject naming a key
+      the payload does not carry
+
+  `type` may be an atom or a string: it arrives as a string over JSON and as an
+  atom from `Courier.Deliver`.
+  """
+  @spec build(atom() | type(), map()) ::
+          {:ok, Swoosh.Email.t()} | {:error, atom() | {:invalid_payload, Ecto.Changeset.t()}}
+  def build(type, payload) when is_map(payload) do
+    with {:ok, type} <- fetch_type(type),
+         {:ok, fields} <- cast(type, payload),
+         {:ok, from} <- from(),
+         {:ok, subject} <- subject(type, fields) do
+      {:ok, compose(type, fields, from, subject)}
+    end
+  end
+
+  @doc """
+  Builds the message for `type` and hands it to `Courier.Mailer`.
+
+  Same errors as `build/2`, plus `{:error, reason}` from the adapter — which in
+  test is `Swoosh.Adapters.Test` and cannot fail.
+  """
+  @spec deliver(atom() | type(), map()) :: {:ok, term()} | {:error, term()}
+  def deliver(type, payload) do
+    with {:ok, email} <- build(type, payload), do: Mailer.deliver(email)
+  end
+
+  # Type, then payload, then configuration: the two configuration errors are
+  # reported after the caller's payload is known good, because a deployment that
+  # is misconfigured should not hide a request that is also wrong.
+
+  defp fetch_type(type) do
+    if to_string(type) in @types,
+      do: {:ok, to_string(type)},
+      else: {:error, :unknown_notification_type}
+  end
+
+  # A payload is not a schema — it is a map the platform handed over and courier
+  # does not own — so it is cast through Ecto with an explicit type map rather
+  # than onto a struct that does not exist. That is what makes a missing address
+  # a changeset error a caller can read instead of a mail to nobody.
+  defp cast(type, payload) do
+    changeset =
+      {empty(), @payload_types}
+      |> cast(normalize(payload), @fields)
+      |> validate_required(required(type))
+      |> validate_format(:email, ~r/^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$/,
+        message: "is not an email address"
+      )
+
+    if changeset.valid? do
+      {:ok, apply_changes(changeset)}
+    else
+      {:error, {:invalid_payload, changeset}}
+    end
+  end
+
+  defp required(type) do
+    case type do
+      "welcome" -> [:email]
+      "password_reset" -> [:email, :url]
+      "team_invitation" -> [:email, :url, :account_name, :invited_by]
+    end
+  end
+
+  defp compose(type, fields, from, subject) do
+    Swoosh.Email.new()
+    |> Swoosh.Email.from(from)
+    |> Swoosh.Email.to({fields.name, fields.email})
+    |> Swoosh.Email.subject(subject)
+    |> Swoosh.Email.html_body(body(type, :html, fields))
+    |> Swoosh.Email.text_body(body(type, :text, fields))
+  end
+
+  # Bodies are rendered per format and then wrapped in the shared layout, so
+  # every email courier sends is wrapped alike and a change to the wrapper is a
+  # change to one template.
+  defp body(type, format, fields) do
+    assigns = [
+      greeting: greeting(fields.name),
+      url: fields.url,
+      account_name: escape(fields.account_name),
+      invited_by: escape(fields.invited_by),
+      role: escape(fields.role)
+    ]
+
+    "#{type}.#{format}"
+    |> Templates.render(assigns)
+    |> then(&Templates.render("layout.#{format}", body: &1))
+  end
+
+  # The platform keys a payload map either way — decoded JSON has strings, an
+  # Elixir caller has atoms — and a payload that arrived with strings must not
+  # come back as "email can't be blank".
+  defp normalize(payload) do
+    Map.new(@fields, fn field ->
+      key = field |> Atom.to_string()
+      {field, Map.get(payload, field, Map.get(payload, key))}
+    end)
+  end
+
+  defp empty, do: Map.new(@fields, &{&1, nil})
+
+  defp from do
+    case Application.get_env(:courier, :mailing, [])[:from] do
+      {name, address} when is_binary(name) and is_binary(address) ->
+        if name == "" or address == "",
+          do: {:error, :from_not_configured},
+          else: {:ok, {name, address}}
+
+      _ ->
+        {:error, :from_not_configured}
+    end
+  end
+
+  defp subject(type, fields) do
+    case subject_template(type) do
+      nil -> {:error, :subject_misconfigured}
+      template -> fill(template, fields)
+    end
+  end
+
+  # Read by string rather than by `:erlang.binary_to_existing_atom`, so a
+  # configuration key cannot become an atom that nothing in the code holds.
+  defp subject_template(type) do
+    Application.get_env(:courier, :mailing, [])
+    |> Keyword.get(:subjects, %{})
+    |> Enum.find_value(fn {key, template} -> if to_string(key) == type, do: template end)
+  end
+
+  defp fill(template, fields) do
+    template
+    |> placeholders()
+    |> Enum.reduce_while({:ok, template}, fn key, {:ok, acc} ->
+      case Enum.find(@fields, &(to_string(&1) == key)) do
+        nil -> {:halt, {:error, :subject_misconfigured}}
+        field -> {:cont, {:ok, String.replace(acc, "%{#{key}}", to_string(fields[field]))}}
+      end
+    end)
+  end
+
+  defp placeholders(template) do
+    ~r/%\{(\w+)\}/
+    |> Regex.scan(template, capture: :all_but_first)
+    |> List.flatten()
+    |> Enum.uniq()
+  end
+
+  defp greeting(nil), do: "Hi,"
+  defp greeting(name), do: "Hi #{escape(name)},"
+
+  defp escape(nil), do: nil
+  defp escape(value) when is_binary(value), do: Plug.HTML.html_escape(value)
+  defp escape(value), do: to_string(value)
+end
