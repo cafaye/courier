@@ -1,0 +1,59 @@
+# The local courier stack: postgres plus courier itself, in a release image.
+#
+#   docker compose up --build     # start the stack
+#   curl localhost:4000/healthz   # liveness
+#   curl localhost:4000/readyz    # readiness — 503 until the database answers
+#   docker compose down           # stop it
+#   docker compose down -v        # stop it and throw the volume away
+#
+# `bin/prime` does not need this file: it runs against a postgres you already
+# have. This stack is here so the release image and the compose contract are
+# exercised the way production will run them.
+
+name: courier
+
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: courier_dev
+    ports:
+      # Published so a host-side `mix ecto.setup` and `mix test` can reach the
+      # same database the container uses.
+      - "5432:5432"
+    volumes:
+      - courier-pg:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready is the only readiness signal that is true when the server
+      # accepts connections, not when the container process is up.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d courier_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PHX_SERVER: "true"
+      PORT: "4000"
+      DATABASE_URL: ecto://postgres:postgres@db/courier_dev
+      POOL_SIZE: "10"
+      PHX_HOST: localhost
+      # A local development value, committed on purpose: this stack is never
+      # published and never runs anything but localhost. Production reads
+      # SECRET_KEY_BASE from the environment (config/runtime.exs raises without
+      # it); generate a real one with `mix phx.gen.secret`.
+      SECRET_KEY_BASE: local-development-only-not-a-secret-z0Yx3Kq9Wv7Tp2Lm5Nc8Rb4Fs6Hd1Jg0
+    ports:
+      - "4000:4000"
+
+volumes:
+  courier-pg:
