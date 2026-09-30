@@ -34,6 +34,8 @@ lib/courier/nats_publisher/noop.ex    the stand-in that hands envelopes back
 lib/courier/principal.ex              the caller, the resolver behaviour, and the
                                       default resolver that authenticates nobody
 lib/courier/secret_box.ex             sealing: a signing secret at rest, AES-GCM
+lib/courier/idempotency_key.ex        one (account, endpoint, key) claim, and its answer
+lib/courier/idempotency.ex            claim a key, store the response, replay it
 lib/courier/webhook_endpoint.ex       the row, its changesets, its status enum
 lib/courier/webhook_endpoints.ex      the context: register, change, remove, trip
 lib/courier/webhook_delivery.ex       one delivery, and its retry state
@@ -52,6 +54,7 @@ lib/courier_web/problem.ex            core's problem+json envelope, built once
 lib/courier_web/plugs/trace.ex        a trace id and the path, for every request
 lib/courier_web/plugs/parse_body.ex   Plug.Parsers, with courier's 400
 lib/courier_web/plugs/principal.ex    who is calling; 401 when nobody is
+lib/courier_web/plugs/idempotency.ex  Idempotency-Key on a mutating POST, and its 409s
 lib/courier_web/plugs/problem_content_type.ex  a non-2xx is problem+json
 lib/courier_web/controllers/health_controller.ex   GET /healthz, GET /readyz
 lib/courier_web/controllers/notification_preferences_controller.ex  GET/PUT /v1
@@ -67,6 +70,7 @@ test/courier/notification_preferences_test.exs  defaults, writes, rejections
 test/courier/events_test.exs          the envelope against core's schema
 test/courier/nats_publisher_test.exs  the behaviour and the stand-in
 test/courier/secret_box_test.exs      a secret is not readable from its column
+test/courier/idempotency_test.exs     the claim, the refusals, the retention, the expiry
 test/courier/webhook_endpoints_test.exs        the rows and their promises
 test/courier/webhook_endpoints_config_test.exs the guard, with a chosen resolver
 test/courier/webhook_deliveries_test.exs       the budget, the backoff, the id
@@ -77,6 +81,8 @@ test/courier/webhooks/sender_test.exs          the request and its classificatio
 test/courier/workers/                 the relay, the fan-out, and the sender
 test/courier_web/controllers/          the API, and the authorization matrix
 test/courier_web/router_test.exs      which controller, which scope, which methods
+test/courier_web/plugs/idempotency_test.exs  the header over real requests: one
+                                           mutation, the replays, and the three 409s
 test/courier_web/openapi_document_test.exs  openapi.yaml against the router, both
                                            directions, and why the probes are
                                            the only omission
@@ -198,6 +204,25 @@ the router serves it.** A `> DECISION NEEDED (courier-05)` is open in the
 document's header: the two `notification_preferences` operations are served
 unauthenticated, and documenting them that way is a fact about the code, not an
 endorsement of it.
+
+**A retryable `POST` claims its `Idempotency-Key` before it does the work, and
+only a 2xx is kept.** The ordering is the whole mechanism: a key recorded after
+the action cannot prevent anything, so `Courier.Idempotency.claim/1` runs in the
+plug and the response is stored in `before_send`, with the row sitting in
+`in_flight` between the two. Two properties follow and both are load-bearing:
+**a request that did not succeed releases its key** rather than storing the
+failure — a stored 422 would pin a caller's typo for 24 hours, and a stored 500
+would pin a courier blip for the same day — and **`endpoint` is the concrete
+request path**, not the route pattern, so a client that reuses one key to test
+four endpoints is not refused on the second.
+
+Two Elixir traps sit under this and are written into `CourierWeb.Plugs.Idempotency`
+and `Courier.Idempotency` rather than left in this file alone, because both fail
+**silently**: `conn.resp_body` inside `before_send` is **iodata, not a binary**
+(`Phoenix.Controller.json/2` encodes to iodata and `Plug.Conn` stores what it is
+given), and Ecto's keyword `where/2` **does not apply the schema's field type**,
+so a `DateTime` compared against a `utc_datetime_usec` column matches nothing.
+Use the `where([k], ...)` macro form and `IO.iodata_to_binary/1`.
 
 **A webhook signature is not courier's to invent.** PLAN.md §7 adopted [Standard
 Webhooks](https://www.standardwebhooks.com) and said "No custom scheme", which

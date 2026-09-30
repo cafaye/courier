@@ -404,6 +404,72 @@ defmodule Courier.TestSupport.OpenAPIPaths do
   end
 
   @doc """
+  Every operation that accepts an `Idempotency-Key` header, or a raised error.
+
+  Read because core's conventions require the header on a mutating `POST` and
+  courier-14 added it to two of them, and the question this file exists to answer
+  is whether the **document and the router name the same operations**. That
+  cannot be checked by reading either side alone: a document that documents the
+  header on a route the router does not guard describes a retry courier is not
+  listening for, and a router that guards a route the document does not mention
+  is a behaviour a generated client has never been told about. Both are the
+  `openapi_paths_test.exs` failure mode, in a new place.
+
+  ## What "accepts" means here, and what it does not
+
+  An operation counts if its own subtree names the header — either as a `$ref` to
+  `#/components/parameters/IdempotencyKey` or as an inline `name: Idempotency-Key`
+  parameter line. That is a **text** match over the operation's block rather than
+  a parse, and the honest limit is worth stating: an unrelated line somewhere in
+  the operation could be mistaken for the parameter.
+
+  It cannot produce a false *negative*, which is the direction that matters here
+  — a parameter declared in either of the two forms is found, and a missing
+  declaration is a missing declaration. A false positive would be a document that
+  mentions the header without declaring it, and core's own
+  `openapi.idempotency-key` rule checks the declaration properly against a real
+  parse, so the two checks together have no gap between them. Neither is
+  sufficient alone; the point of writing them down is that neither is silently
+  load-bearing.
+  """
+  @spec document_idempotency_keys!(Path.t()) :: operations()
+  def document_idempotency_keys!(path \\ "openapi.yaml") do
+    block = paths_block!(path, document_lines!(path))
+    {path_level, method_level} = levels!(path, block)
+
+    block
+    |> groups(path_level)
+    |> Enum.reduce(%{}, fn [{_indent, text, _number} | children], acc ->
+      current = String.trim_trailing(text, ":")
+
+      if path?(current) do
+        children
+        |> method_subtrees(method_level)
+        |> Enum.reduce(acc, fn {method, _line, subtree}, inner ->
+          if accepts_idempotency_key?(subtree) do
+            Map.put(inner, normalise_operation(method, current), %{})
+          else
+            inner
+          end
+        end)
+      else
+        acc
+      end
+    end)
+  end
+
+  # The two forms a document may use, and nothing else. `in: header` is not
+  # required in the match because the `$ref` form does not carry it, and a `$ref`
+  # to a parameter that turned out to be a query parameter would be caught by core's
+  # rule rather than guessed at here.
+  defp accepts_idempotency_key?(subtree) do
+    Enum.any?(subtree, fn {_indent, text, _number} ->
+      String.contains?(text, "#/components/parameters/IdempotencyKey") or
+        String.contains?(text, "name: Idempotency-Key")
+    end)
+  end
+
+  @doc """
   Every reusable response under `components.responses`, or a raised error.
 
   Keyed by the name a `$ref` would use. Each entry says whether it names

@@ -8,8 +8,15 @@
 # define.
 #
 # UNRESOLVED, and deliberately not guessed here:
-#   - `core: ^0.1.0` assumes core's first release is 0.1.0. If it lands as 0.2.0
-#     this line is wrong and CI's pin will not resolve.
+#   - `core: ^0.2.0` was `^0.1.0` until courier-14, and the guess this comment
+#     used to record has been settled: core publishes `0.2.0` in its own `VERSION`
+#     file (core-17), and its contract harness now resolves this line and fails
+#     the build when the declared range does not admit the published version. The
+#     note is kept rather than deleted because it is the only record in this file
+#     of which line is enforced by something outside this repository, and the
+#     next reader of a `core:` bump should know the pin is checked rather than
+#     assumed. To change it: edit `VERSION` in core first, then this line in the
+#     same commit, or this range will be red on the next core change.
 #   - `exposes.api` points at `openapi.yaml`, which as of courier-05 documents
 #     every route the router serves except `/healthz` and `/readyz`, and says so
 #     in its own header. It used to be partial — courier-03 left
@@ -37,7 +44,7 @@ name: courier
 description: cafaye courier — transactional email, notification preferences, and every outbound webhook.
 
 language: elixir
-core: ^0.1.0
+core: ^0.2.0
 
 # courier serves HTTP traffic, so it declares a contract surface.
 #

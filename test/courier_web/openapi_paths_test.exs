@@ -840,4 +840,126 @@ defmodule CourierWeb.OpenAPIPathsTest do
       assert message =~ "test/courier_web/openapi_paths_test.exs"
     end
   end
+
+  describe "reading which operations accept Idempotency-Key" do
+    # The reader `CourierWeb.OpenAPIErrorResponsesTest` compares the document's
+    # half of "which operations are guarded" against the router's half. A reader
+    # that returned an empty set would make that comparison agree for the wrong
+    # reason, so these are its tests, on synthetic documents, with the faults
+    # injected — the same discipline the rest of this file applies to itself.
+
+    test "it finds the operation that refs the parameter" do
+      document =
+        write_document([
+          "openapi: 3.1.0",
+          "paths:",
+          "  /v1/widgets:",
+          "    post:",
+          "      parameters:",
+          "        - $ref: '#/components/parameters/IdempotencyKey'",
+          "    get:",
+          "  /v1/widgets/{id}:",
+          "    post:",
+          "      parameters:",
+          "        - $ref: '#/components/parameters/EndpointId'"
+        ])
+
+      assert Map.keys(Paths.document_idempotency_keys!(document)) == [
+               {"POST", "/v1/widgets"}
+             ]
+    end
+
+    test "it finds an inline parameter as well as a $ref" do
+      # A document that does not use `components.parameters` is still a document
+      # that declares the header, and the check would otherwise report a drift
+      # that does not exist.
+      document =
+        write_document([
+          "openapi: 3.1.0",
+          "paths:",
+          "  /v1/widgets:",
+          "    post:",
+          "      parameters:",
+          "        - name: Idempotency-Key",
+          "          in: header",
+          "          schema:",
+          "            type: string"
+        ])
+
+      assert Map.keys(Paths.document_idempotency_keys!(document)) == [
+               {"POST", "/v1/widgets"}
+             ]
+    end
+
+    test "it does not read one operation's header as another's" do
+      # The fault this reader is most likely to have: `POST` inheriting `GET`'s
+      # `parameters`, or the reverse, because a subtree was taken one level too
+      # wide. `PATCH` is here as the innocent bystander a too-wide read would
+      # wrongly pick up.
+      document =
+        write_document([
+          "openapi: 3.1.0",
+          "paths:",
+          "  /v1/widgets:",
+          "    post:",
+          "      parameters:",
+          "        - $ref: '#/components/parameters/IdempotencyKey'",
+          "    get:",
+          "      summary: no header here",
+          "    patch:",
+          "      summary: nor here"
+        ])
+
+      assert Map.keys(Paths.document_idempotency_keys!(document)) == [
+               {"POST", "/v1/widgets"}
+             ]
+    end
+
+    test "it normalises the path the way the other readers do" do
+      # Otherwise the document says `POST /v1/widgets/{id}/test` and the router
+      # says `POST /v1/widgets/:id/test`, and the two halves of the comparison
+      # never meet.
+      document =
+        write_document([
+          "openapi: 3.1.0",
+          "paths:",
+          "  /v1/widgets/{id}/test:",
+          "    post:",
+          "      parameters:",
+          "        - $ref: '#/components/parameters/IdempotencyKey'"
+        ])
+
+      assert Map.keys(Paths.document_idempotency_keys!(document)) == [
+               {"POST", "/v1/widgets/{}/test"}
+             ]
+    end
+
+    test "it is empty, not broken, for a document that declares the header nowhere" do
+      # The empty case is a real answer here and must not raise: a service that
+      # does not implement idempotency is a legitimate document, and the point of
+      # the comparison is to notice the moment that stops being true.
+      document =
+        write_document([
+          "openapi: 3.1.0",
+          "paths:",
+          "  /v1/widgets:",
+          "    get:",
+          "    post:"
+        ])
+
+      assert Paths.document_idempotency_keys!(document) == %{}
+    end
+
+    test "it is the same reader the check uses, not a second implementation" do
+      # Against the real document, so a rename of the parameter component that
+      # broke the reader would be caught here rather than in a green check over
+      # an empty set.
+      operations = Paths.document_idempotency_keys!("openapi.yaml")
+
+      assert Map.keys(operations) |> Enum.sort() == [
+               {"POST", "/v1/webhook_endpoints"},
+               {"POST", "/v1/webhook_endpoints/{}/test"}
+             ]
+    end
+  end
 end
