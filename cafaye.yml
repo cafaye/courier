@@ -1,0 +1,60 @@
+# cafaye.yml — the cafaye project manifest for courier.
+#
+# The schema is owned by cafaye/core, and core is pre-1.0, so this file is a
+# DRAFT written against core's current manifest conventions
+# (core/docs/manifest-conventions.md, core/schemas/cafaye.manifest.schema.json).
+# When core freezes the manifest spec, `caf init` regenerates and validates this
+# file and it stops being hand-maintained. Do not add fields core does not
+# define.
+#
+# UNRESOLVED, and deliberately not guessed here:
+#   - `core: ^0.1.0` assumes core's first release is 0.1.0. If it lands as 0.2.0
+#     this line is wrong and CI's pin will not resolve.
+#   - `exposes.api` has no document to point at yet. `/healthz` and `/readyz` are
+#     infrastructure probes, not API surface, so they are not spec'd. courier
+#     gains its first real endpoint (transactional email, Phase 3) and this is
+#     where the OpenAPI document goes.
+#   - `consumes` is empty. courier is not subscribed to anything yet; when it
+#     starts reacting to identity or billing events this is the list, and every
+#     entry has to come with an idempotent consumer, because delivery is
+#     at-least-once (PLAN.md §3).
+
+name: courier
+description: cafaye courier — transactional email, notification preferences, and every outbound webhook.
+
+language: elixir
+core: ^0.1.0
+
+# courier serves HTTP traffic, so it declares a contract surface.
+#
+# The five event types below are core's, not this repository's: they are courier's
+# row in `core/docs/event-naming.md`, and core asserts that its catalog and its
+# example manifests agree in both directions. They are declared here so courier's
+# own manifest says the same thing core does.
+#
+# None of them is emitted yet. This is a v0 scaffold: there is no Swoosh, no
+# provider, no Oban, no queue. Emitting `email.queued` is Phase 3 work, and
+# these lines are its checklist — the event envelope is validated against
+# `core/schemas/event-envelope.schema.json` in a contract test when that lands.
+exposes:
+  events:
+    - email.queued
+    - email.delivered
+    - email.bounced
+    - email.complained
+    - notification.suppressed
+
+consumes: []
+
+# Other cafaye services. Empty: courier depends on postgres, not on a sibling
+# service, and the services that will depend on it depend the other way round.
+dependencies: []
+
+repository:
+  url: git@github.com:cafaye/courier.git
+  defaultBranch: master
+  visibility: public
+
+owner:
+  team: courier
+  contact: courier@cafaye.com
