@@ -87,8 +87,10 @@ test/support/openapi_paths.ex        the reader and the comparison the two above
 test/support/recording_sender.ex      a sender that records instead of sending
 test/support/header_resolver.ex       a principal that reads a header
 test/support/test_dns.ex              a resolver that answers from a table
+gate.yml                              the gate, DECLARED: command, proof, what it needs
 bin/prime                             the gate: deps, database, tests
 bin/assert-suite                      refuses a run that skipped or excluded tests
+bin/gate-self-test                    proves gate.yml is able to fail
 bin/toolchain-pins                    reads mise.toml, checks CI has not drifted
 .github/workflows/ci.yml              calls kit's workflow, plus gate and release
 Dockerfile                            two-stage release build, slim final stage
@@ -125,6 +127,24 @@ pipeline are Phase 3 packets — not this one, not "just to prepare".
 **`mix precommit` before you commit.** It compiles with warnings-as-errors,
 drops unused deps from the lockfile, formats, and runs the suite. `bin/prime`
 is the gate for a clean checkout; `mix precommit` is what a change must pass.
+
+**The gate is declared in `gate.yml`, not discovered.** Written against
+`cafaye/core`'s `schemas/gate.schema.json` and checked by its
+`harness/bin/gate-check`, which reads `command`, `miseTask`, `entrypoint`, the
+`external.requirements`, the `ci` block, and the `proof`. Two things follow.
+First, the proof: `bin/prime` must print `Result: N passed` at or above the floor
+in `gate.yml`, and that is what separates a gate from a command that exits zero —
+`1/1 passed` and `3/3 passed` are the same claim without a floor. When the suite
+grows, **raise `gate.proof[].minimum` in the same commit**, the same rule that
+already applies to CI's `bin/assert-suite` floors. Second, the requirements: the
+gate needs a migrated postgres, the pinned toolchain, and one hex fetch, and
+`selfContained: false` with that list is the honest answer. **A gate that needs
+something and does not say so is the defect this format exists to prevent**, so
+add a requirement rather than letting the gate quietly assume one.
+`bin/gate-self-test` breaks `gate.yml` nine ways and asserts core's checker
+catches each; it is a CI step of its own, not part of `bin/prime`, because a
+self-test inside every gate invocation is a second gate that can disagree with
+the first.
 
 **The CI gate is `bin/prime`, the same command, not a CI variant of it.** If the
 two can disagree, one of them is lying. The workflow adds a database, the tier
