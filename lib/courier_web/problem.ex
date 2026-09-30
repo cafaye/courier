@@ -46,6 +46,15 @@ defmodule CourierWeb.Problem do
   machine-readable contract — and it is the kind of lie a generated client turns
   into a retry loop, because "internal" is the one code every client retries.
 
+  **Two of the codes share 409, and core's own reserved list does the same**:
+  `conflict` and `idempotency_key_reused` are both listed at 409, and
+  `CourierWeb.Plugs.Idempotency` sends each for a different reason. A client
+  branches on `code` and not on the status, so the two are distinguishable; the
+  consequence to be aware of is only that `for_status/1` cannot recover which of
+  them a bare 409 meant, and it is never asked — nothing in Phoenix raises a 409,
+  so that function is only ever the fallback for a status that arrived from
+  outside a controller.
+
   Everything else still falls back to `internal`, so an unlisted status answers
   with courier's envelope rather than Phoenix's. `for_status/1` is the seam, and
   every status courier can be made to return has a line in the table above it;
@@ -64,6 +73,7 @@ defmodule CourierWeb.Problem do
     not_found: {404, "Not found"},
     not_acceptable: {406, "Not acceptable"},
     conflict: {409, "Conflict"},
+    idempotency_key_reused: {409, "Idempotency key reused"},
     unsupported_media_type: {415, "Unsupported media type"},
     validation_failed: {422, "Validation failed"},
     rate_limited: {429, "Rate limited"},

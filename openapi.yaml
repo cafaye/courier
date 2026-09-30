@@ -38,9 +38,10 @@
 #   * **403 `forbidden`** — nothing sends it. `CourierWeb.Plugs.Principal`
 #     answers 401 for an anonymous caller and nothing else, and an endpoint in
 #     another account is a 404, because core forbids a 403 that leaks existence.
-#   * **409 `conflict` / `idempotency_key_reused`** — nothing sends them. A
-#     duplicate `url` is a **422** whose `errors[0].code` is `taken`, which is the
-#     status convention's "semantically wrong", not a conflict.
+#   * **409 on a duplicate `url`** — a duplicate `url` is a **422** whose
+#     `errors[0].code` is `taken`, which is the status convention's
+#     "semantically wrong", not a conflict. The 409 that *is* declared is for
+#     `Idempotency-Key` alone, below.
 #   * **415 `unsupported_media_type`** — the parser is configured
 #     `pass: ["*/*"]`, so an unknown content type is neither parsed nor refused.
 #     The request reaches the controller and is answered 422 for the field it did
@@ -50,22 +51,49 @@
 #   * **503 `unavailable`** — only `GET /readyz` sends it, and that is an
 #     infrastructure probe rather than a customer operation.
 #
-# ## Idempotency-Key is not accepted, and this document does not pretend it is
+# ## Idempotency-Key, and what each of the three answers means
 #
-# Core's conventions require `Idempotency-Key` on a mutating `POST` that can be
-# retried safely, and `createWebhookEndpoint` is exactly that: it registers a
-# destination that will receive at-least-once deliveries. **courier does not
-# implement it.** Measured: the same key sent three times with the same body
-# creates two rows and answers `201`, `422`, `422` — the 422s are the unique index
-# on `url`, not the key — the same key with a different body creates a further
-# row, and there is no `Idempotency-Replayed` response header. A non-uuid key and
-# a 5000-character key are both accepted without complaint.
+# Both mutating `POST`s accept `Idempotency-Key`, as core's conventions require
+# of a POST that can be retried safely. `createWebhookEndpoint` registers a
+# destination that will receive at-least-once deliveries, and a caller that timed
+# out on it has no other way to learn whether the first attempt landed.
 #
-# So no operation below declares the header, and none declares a 409 courier
-# cannot return. Declaring either would be a contract for behaviour that is not
-# there, and a client that generated a retry from it would be retrying against a
-# service that was never listening. It is named as a gap rather than papered
-# over — REPORT-courier-12-contract.md has the measurement.
+# courier-12 measured that courier did **not** implement this, and said so here
+# rather than declaring a contract for behaviour that was not there. That gap is
+# closed as of courier-14, and this section is rewritten rather than deleted, so
+# the reader can see that the header was once accepted and ignored and is now the
+# mechanism the 409s below exist for.
+#
+#   * **Same key, same body, already answered** — the stored response, byte for
+#     byte, with `Idempotency-Replayed: true`. For `createWebhookEndpoint` that
+#     response carries the signing secret, which exists in exactly one 201 and
+#     cannot be re-derived, so a client that lost the first response to a timeout
+#     gets the secret back from its retry.
+#   * **Same key, different body** — 409 `idempotency_key_reused`.
+#   * **Same key, same body, first attempt still running** — 409 `conflict`.
+#     Core's five sentences do not describe the concurrent case, and this is
+#     courier's answer: not `idempotency_key_reused`, because the bodies are
+#     identical and saying otherwise is a lie a retry loop is built on, and not a
+#     503, because nothing is unavailable. `conflict` is core's own word for a
+#     request that collides with current state.
+#
+# Three things the header does **not** do, each measured rather than assumed:
+#
+#   * **A request with no key is processed normally** and records nothing. A
+#     retry without a key is the client's bug, and it is answered as though the
+#     key were absent.
+#   * **Only a 2xx is stored.** A 4xx leaves the key free immediately, so a
+#     client that fixed its request and retried with the same key gets its new
+#     answer rather than a 409 about a key it never reused; a 5xx leaves it free
+#     too, so a transient courier failure is not pinned for a day.
+#   * **A key that is not a uuid is a 422.** courier-12 measured that a non-uuid
+#     and a 5000-character key were both accepted without complaint; the second
+#     of those was a string in a unique index, paid for by every write.
+#
+# Retention is 24 hours, scoped to the `(account, endpoint, key)` triple with
+# `endpoint` the concrete path. REPORT-courier-14-coreversion.md has the
+# measurements, including the two Elixir behaviours that had to be discovered the
+# hard way and are now written into the code that depends on them.
 #
 # ## Two other facts about this surface, because a reader is owed them
 #
@@ -101,13 +129,14 @@ info:
   # this number changes in the same commit.
   #
   # This is a minor bump and nothing more. No path changed, no operation was added
-  # or removed, and no request or response that already existed changed shape:
-  # courier-12 added the two error responses every operation could already return
-  # and described none of (`500` and `406`), and declared the `detail` courier
-  # already sends inside a 422's `errors[]`. Core's sync rule is that a
-  # non-breaking change bumps only `info.version`, and a client that already reads
-  # this file is not broken by learning that a 500 was possible.
-  version: 1.3.0
+  # or removed, and no request or response that already existed changed shape.
+  # courier-14 added `Idempotency-Key` to the two mutating POSTs, the two 409s it
+  # can now answer, and the `Idempotency-Replayed` response header — all of which
+  # describe what courier now does, and all of which are additive: a client that
+  # sends no key is unaffected, and one that already read this file is not broken
+  # by learning a 409 was possible. A client that *generates* a retry from the new
+  # header is the case this bump exists for.
+  version: 1.4.0
   title: caFaye courier
   description: |
     Transactional email, notification preferences, and outbound webhooks.
@@ -290,6 +319,8 @@ paths:
         told which one they have.
       security:
         - bearerAuth: [webhooks:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -317,6 +348,9 @@ paths:
       responses:
         '201':
           description: Registered, with the signing secret
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/parameters/IdempotencyReplayed'
           content:
             application/json:
               schema:
@@ -339,6 +373,32 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '406': { $ref: '#/components/responses/NotAcceptable' }
+        '409':
+          description: >-
+            The `Idempotency-Key` was reused with a different body, or its first
+            request is still in flight. The two are distinguished by `code`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                reused:
+                  summary: Same key, different body
+                  value:
+                    type: https://errors.cafaye.com/idempotency_key_reused
+                    title: Idempotency key reused
+                    status: 409
+                    detail: That Idempotency-Key was already used for a different request body.
+                    code: idempotency_key_reused
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
+                in_flight:
+                  summary: Same key, first request still running
+                  value:
+                    type: https://errors.cafaye.com/conflict
+                    title: Conflict
+                    status: 409
+                    detail: That Idempotency-Key is still being processed.
+                    code: conflict
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '500': { $ref: '#/components/responses/Internal' }
 
@@ -446,11 +506,21 @@ paths:
         testing their own endpoint and getting a 500 has learned something true,
         and charging their circuit for asking would punish them for using the
         diagnostic.
+
+        `Idempotency-Key` applies here too, and it matters more than it looks: a
+        retried ping with the same key is answered from the stored response, so
+        the customer's endpoint receives **one** signed request rather than two. A
+        test endpoint that receives duplicates is a support question.
       security:
         - bearerAuth: [webhooks:write]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '200':
           description: The ping was sent; `delivered` says whether it was accepted
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/parameters/IdempotencyReplayed'
           content:
             application/json:
               schema:
@@ -475,6 +545,32 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '406': { $ref: '#/components/responses/NotAcceptable' }
+        '409':
+          description: >-
+            The `Idempotency-Key` was reused with a different body, or its first
+            request is still in flight. The two are distinguished by `code`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                reused:
+                  summary: Same key, different body
+                  value:
+                    type: https://errors.cafaye.com/idempotency_key_reused
+                    title: Idempotency key reused
+                    status: 409
+                    detail: That Idempotency-Key was already used for a different request body.
+                    code: idempotency_key_reused
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
+                in_flight:
+                  summary: Same key, first request still running
+                  value:
+                    type: https://errors.cafaye.com/conflict
+                    title: Conflict
+                    status: 409
+                    detail: That Idempotency-Key is still being processed.
+                    code: conflict
+                    trace_id: 0af7651916cd43dd8448eb211c80319c
         '500': { $ref: '#/components/responses/Internal' }
 
 components:
@@ -524,6 +620,54 @@ components:
         not parse it; courier's encoding may change without notice. A cursor
         courier did not issue is a 422.
       schema: { type: string }
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        A uuid the client chooses, which makes a retry of this request free.
+
+        Send it, and a retry with the **same** key and the **same** body returns
+        the first response byte for byte with `Idempotency-Replayed: true` — for
+        `createWebhookEndpoint` that includes the signing secret, which exists in
+        exactly one response and cannot be re-derived. Without it a caller that
+        timed out cannot know whether the first attempt landed, and retrying a
+        webhook registration produces a second destination courier will sign for.
+
+        Three cases, and a client can tell them apart by `code`:
+
+        | you sent | you get | `code` |
+        | --- | --- | --- |
+        | same key, same body, already answered | the first response, with `Idempotency-Replayed: true` | — |
+        | same key, different body | 409 | `idempotency_key_reused` |
+        | same key, same body, first attempt still running | 409 | `conflict`; retry the same request shortly |
+
+        Omitting the header is not an error: the request is processed normally,
+        and a retry without a key is the client's own problem. A key that is not a
+        uuid is a 422 — the header is a uuid because an unbounded string in a
+        unique index is a cost every write pays.
+
+        The key is scoped to the `(account, endpoint, key)` triple, and `endpoint`
+        is the **concrete** path, so the same key used to test two different
+        endpoints is two different keys. Retention is 24 hours, after which the
+        key behaves as though it had never been used. Only a 2xx is stored, so a
+        request that failed leaves the key free to use again immediately.
+      schema: { type: string, format: uuid }
+
+    IdempotencyReplayed:
+      name: Idempotency-Replayed
+      in: header
+      required: false
+      description: |
+        `true`, and **only** on a response that is a stored replay of an earlier
+        request rather than the answer to the one in front of courier. A client
+        that receives it knows the mutation happened exactly once. Absent on every
+        first response, and absent on every request sent without a key.
+      schema:
+        type: string
+        enum:
+          - 'true'
 
   schemas:
     NotificationType:
@@ -726,6 +870,50 @@ components:
             status: 404
             detail: No webhook endpoint with that id.
             code: not_found
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    IdempotencyKeyReused:
+      description: |
+        The client sent an `Idempotency-Key` it has already used on this endpoint
+        **with a different body**. Core's conventions: "Replay with the same key
+        but a different body returns 409 `idempotency_key_reused`."
+
+        A client bug, and the fix is in the request: either send the original body
+        again to get the original response, or choose a new key. courier will not
+        guess which of the two bodies was intended.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/idempotency_key_reused
+            title: Idempotency key reused
+            status: 409
+            detail: That Idempotency-Key was already used for a different request body.
+            code: idempotency_key_reused
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    Conflict:
+      description: |
+        The client sent an `Idempotency-Key` whose first request on this endpoint
+        is **still being processed**, so there is no stored response to replay
+        yet. Two requests with one key arriving at the same time is not a retry.
+
+        Not `idempotency_key_reused`: the bodies are identical, and telling a
+        client its key was reused with a different body when it was not is the kind
+        of lie a retry loop is built on. Retry the same request with the same key
+        shortly and the answer will be the original one.
+
+        Core's `openapi-conventions.md` §Idempotency does not describe this case.
+        It is courier's, and `conflict` is a code core already reserves at 409.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/conflict
+            title: Conflict
+            status: 409
+            detail: That Idempotency-Key is still being processed.
+            code: conflict
             trace_id: 0af7651916cd43dd8448eb211c80319c
 
     Internal:

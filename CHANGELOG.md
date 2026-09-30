@@ -12,6 +12,74 @@ document lands in both files in one commit, because core asserts the two agree.
 
 ## [Unreleased]
 
+### Added
+
+- **`Idempotency-Key` is implemented on the two mutating `POST`s.** Core's
+  `docs/openapi-conventions.md` §Idempotency has required it since courier-05, and
+  courier-12 measured that courier accepted the header and ignored it: three
+  requests with one key created one row and answered `201`, `422`, `422` (the 422s
+  were the unique index on `url`, not the key), there was no
+  `Idempotency-Replayed` header, and a non-uuid key and a 5000-character key were
+  both taken without complaint. That gap is closed, and core's contract checker
+  — which named all three of the openapi idempotency rules as violations — is now
+  green against this repository.
+  - **A retry is free and provably is one mutation.** The same key with the same
+    body returns the first response **byte for byte** with
+    `Idempotency-Replayed: true`. For `createWebhookEndpoint` that response
+    carries the `whsec_` signing secret, which exists in exactly one 201 and
+    cannot be re-derived — so a client that lost it to a timeout gets it back
+    from its retry, which is the whole reason a registration endpoint needs this.
+  - **The claim is taken before the controller runs, not after.** A key recorded
+    only once the action has happened cannot prevent anything: two requests would
+    both run and both mutate. `idempotency_keys` holds the claim in an `in_flight`
+    state between the two, and `unique (account_id, endpoint, idempotency_key)` is
+    what decides the race at the database.
+  - **A retried `POST /{id}/test` sends nothing the second time.** Asserted by
+    clearing the recording sender and finding nothing recorded, because a test
+    endpoint that receives duplicate pings is a support question.
+  - **A request that did not succeed leaves no row.** A stored 4xx would pin the
+    caller's own typo for 24 hours — they fix it, retry with the same key, and get
+    a 409 about a key they never reused — and a stored 5xx would pin a transient
+    courier failure for the same day. Only a 2xx is replayed.
+  - **A key that is not a uuid is now a 422.** An unbounded key is a string in a
+    unique index, paid for by every write that is not the one carrying it.
+
+### Changed
+
+- **`cafaye.yml` declares `core: ^0.2.0`, not `^0.1.0`.** The stale number was
+  flagged in the manifest's own header as an unresolved guess — "assumes core's
+  first release is 0.1.0; if it lands as 0.2.0 this line is wrong". It landed as
+  0.2.0, and core-17 made `core:` enforced rather than declarative, so the guess
+  had become a build failure. The header note is rewritten to say what the line
+  now does rather than deleted, because it is the only record in the file of which
+  line is checked by something outside this repository.
+- **`openapi.yaml` is 1.3.0 → 1.4.0.** `Idempotency-Key` on both POSTs, the two
+  409s they can now answer, and the `Idempotency-Replayed` response header. A
+  minor bump: no path changed, no operation was added or removed, and nothing that
+  existed changed shape. A client that sends no key is unaffected.
+- **409 is no longer a status courier does not return.** The document's header
+  listed it among the omissions, with the measured reason that a duplicate `url`
+  is a 422 whose `errors[0].code` is `taken`. That is still true and still what
+  the header says about *that*; the 409 that is now declared is for
+  `Idempotency-Key`.
+
+### Fixed
+
+- **Two Elixir behaviours that made idempotency silently not work**, both found by
+  running the thing rather than by reading it, and both now written into the code
+  that depends on them so the next reader does not rediscover them:
+  - **`conn.resp_body` inside a `before_send` callback is iodata, not a binary.**
+    `Phoenix.Controller.json/2` encodes to iodata and `Plug.Conn` stores what it
+    is given, so a first draft that required `is_binary/1` released every claim.
+    Nothing raised: the request answered `201`, and the retry created a second
+    endpoint.
+  - **Ecto's keyword `where/2` does not apply the schema's field type.** A
+    `DateTime` handed to `where(IdempotencyKey, expires_at: ^now)` reaches the
+    database uncast and matches nothing against a `utc_datetime_usec` column —
+    measured as 1 row by raw SQL and 0 rows by the query, against the same table.
+    Every query in `Courier.Idempotency` uses the `where([k], ...)` macro form.
+
+
 courier can send a transactional mail, honour what the user asked not to receive,
 record every send as an event that its own relay publishes, and deliver those
 events to customer HTTP endpoints with the Standard Webhooks signature scheme.

@@ -69,7 +69,12 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
       responses: Paths.document_responses!(@document),
       components: Paths.component_responses!(@document),
       header: @document |> File.read!() |> String.split("openapi: 3.1.0") |> List.first(),
-      router: Paths.router_operations!()
+      router: Paths.router_operations!(),
+      # The operations the document says accept `Idempotency-Key`, read from the
+      # document rather than written down — a list here would be a check that can
+      # only fail for an operation somebody remembered to type, which is the
+      # failure mode this file's own moduledoc is about.
+      idempotent: Paths.document_idempotency_keys!(@document)
     }
   end
 
@@ -308,9 +313,16 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
     # sentences are wrapped: matching a whole sentence would fail the first time
     # somebody reflows a comment, which teaches nobody anything. The reason is
     # here so the token is not a mystery.
+    # **409 left this list in courier-14**, and its departure is the reason the
+    # list is a list rather than a constant. It was here on the measured reason
+    # that a duplicate `url` is a 422 whose `errors[0].code` is `taken` — which is
+    # still true, and is still what the document's header says about *that*. What
+    # changed is that courier began returning a 409 for a different reason
+    # entirely: `Idempotency-Key`. So the status stopped being unreachable and
+    # became declared on the two operations that accept the header, and the check
+    # that would have caught it going the other way is the provoke below.
     @unreachable %{
       "403" => {"Principal", "`CourierWeb.Plugs.Principal` answers 401 and nothing else"},
-      "409" => {"taken", "a duplicate url is a 422 whose `errors[0].code` is `taken`, not a 409"},
       "415" => {"pass:", "the parser is configured `pass: [\"*/*\"]` and refuses nothing"},
       "429" => {"no limiter", "thirty rapid writes answer thirty 201s"},
       "503" => {"readyz", "only `GET /readyz` sends it, and that is not an operation"}
@@ -352,19 +364,107 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
                  "#{reason}."
       end
     end
+  end
 
-    test "Idempotency-Key is absent, because courier does not implement it", %{header: header} do
-      # The brief for this packet asked for `Idempotency-Key` on the two mutating
-      # POSTs. It is not declared, because it is not implemented, and the
-      # measurement is in the header. If a later packet implements it, the header
-      # stops being true and this test is where that has to be noticed.
-      assert header =~ "Idempotency-Key",
-             "#{@document} says nothing about `Idempotency-Key`, and courier accepts the " <>
-               "header and ignores it. The gap has to be written down, because a client " <>
-               "reading a document that is silent reasonably assumes there is no gap."
+  # --- Idempotency-Key: the document and the router, both directions -------------
 
-      assert header =~ "does not",
-             "#{@document} mentions `Idempotency-Key` without saying courier ignores it"
+  describe "Idempotency-Key" do
+    test "a 409 courier can send is a 409 the document declares", %{
+      responses: responses
+    } do
+      # The completeness direction, provoked rather than written down: the first
+      # request with a key succeeds and is stored, the second presents the same key
+      # with a different body, and courier answers 409. Before courier-14 this
+      # request did not exist — the header was accepted and ignored — and the
+      # document was right not to declare a 409 for it. Now the code sends one and
+      # the document has to say so, and this is the test that makes that a
+      # requirement rather than a coincidence.
+      operation = {"POST", "/v1/webhook_endpoints"}
+      body = idempotency_conflict(operation)
+
+      assert body["status"] == 409,
+             "#{label(operation)} answered the reused key with #{body["status"]} and " <>
+               "`#{inspect(body["code"])}`. If courier has stopped sending a 409 here, " <>
+               "this test is now measuring nothing and the 409 below should be removed " <>
+               "from the document in the same commit that stopped sending it."
+
+      assert body["code"] in ["idempotency_key_reused", "conflict"],
+             "#{label(operation)} answered 409 with `code` #{inspect(body["code"])}, which " <>
+               "is neither of the two codes core's reserved list puts at 409 for this case"
+
+      assert Map.has_key?(responses[operation], "409"),
+             undeclared([operation], "409", responses)
+    end
+
+    test "every operation the document gives the header to is behind the plug", %{
+      idempotent: idempotent
+    } do
+      # The direction a document-only check cannot see: a header declared on a route
+      # the router does not guard is a retry courier is not listening for.
+      for operation <- Map.keys(idempotent) do
+        assert idempotent_in_router?(operation),
+               "#{@document} declares `Idempotency-Key` on #{label(operation)}, and the " <>
+                 "router does not put it behind `CourierWeb.Plugs.Idempotency`. A client " <>
+                 "generating a retry from this document would be retrying against a " <>
+                 "service that ignores the header."
+      end
+    end
+
+    test "every operation behind the plug is one the document gives the header to", %{
+      idempotent: idempotent
+    } do
+      # And the other direction: a route courier guards but does not document is a
+      # behaviour no generated client has been told about, which is the same defect
+      # `OpenAPIDocumentTest` exists to catch for paths.
+      guarded = guarded_operations()
+
+      assert MapSet.size(guarded) > 0,
+             "no operation is behind the idempotency plug, so the plug is not in the " <>
+               "router. Either the pipeline was removed or these tests are checking " <>
+               "nothing at all."
+
+      for operation <- Enum.to_list(guarded) do
+        assert Map.has_key?(idempotent, operation),
+               "the router puts #{label(operation)} behind `CourierWeb.Plugs.Idempotency`, " <>
+                 "and #{@document} does not declare `Idempotency-Key` on it. The behaviour " <>
+                 "is real and a client generated from this document does not know about it."
+      end
+    end
+
+    test "each one declares the 409 the plug can send, with problem+json", %{
+      responses: responses,
+      idempotent: idempotent
+    } do
+      # `openapi.idempotency-conflict-documented` in core's harness is the neutral
+      # half of this; it reads a parse, so it cannot know whether the 409 is real.
+      for operation <- Map.keys(idempotent) do
+        assert Map.has_key?(responses[operation], "409"),
+               "#{label(operation)} accepts `Idempotency-Key` and declares " <>
+                 "#{inspect(Enum.sort(Map.keys(responses[operation])))}. Core's conventions: a client " <>
+                 "holding a key has to be able to look up what happens when it sends the " <>
+                 "key twice with different bytes, and an operation with no 409 has told " <>
+                 "that client nothing."
+
+        assert responses[operation]["409"].problem_json,
+               "#{label(operation)} declares a 409 (openapi.yaml:#{responses[operation]["409"].line}) " <>
+                 "that does not name `application/problem+json`. The 409 is courier's " <>
+                 "envelope, so a client switching on the content type has to see it."
+      end
+    end
+
+    test "the document says the header is implemented, because it now is" do
+      # The inverse of the test courier-12 wrote, which asserted the document said
+      # courier *ignored* the header. That assertion was correct then and is a lie
+      # now, and a header that quietly says the opposite of the code is the exact
+      # failure this file exists to prevent.
+      header = File.read!(@document) |> String.split("openapi: 3.1.0") |> List.first()
+
+      assert header =~ "Idempotency-Key"
+
+      refute header =~ "does not implement it",
+             "#{@document} still says courier does not implement `Idempotency-Key`. It " <>
+               "does, and a client reading this header would be told to protect a retry " <>
+               "by something courier will not do."
     end
   end
 
@@ -483,6 +583,78 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
                  "`code` is told courier failed internally whatever actually happened"
       end
     end
+  end
+
+  # --- Idempotency-Key helpers -------------------------------------------------
+
+  # The router's own answer to "which operations are behind the idempotency plug",
+  # read from `CourierWeb.Router.__routes__/0` rather than written down. The
+  # document's half of the same question is `Paths.document_idempotency_keys!/1`,
+  # and the two are compared against each other — neither is a list somebody
+  # maintained.
+  defp guarded_operations do
+    CourierWeb.Router.__routes__()
+    # `pipe_through` is **only** on `Phoenix.Router.route_info/4`. Neither
+    # `__routes__/0` nor `routes/1` carries it — the latter's route maps have keys
+    # `[:path, :metadata, :plug, :plug_opts, :verb, :helper]` and nothing else — and
+    # `route_info/4` wants a *concrete* path rather than a pattern, so the `:id` and
+    # `:user_id` segments are filled with a real uuid first.
+    #
+    # `router_test.exs` reads the same thing the same way for the same reason. It
+    # is written down here because the alternative failure is not a crash: a route
+    # guarded by nothing reads as one guarded by nothing, and this check goes green
+    # on the absence of the thing it is checking for.
+    |> Enum.filter(fn route ->
+      path = String.replace(route.path, ~r/:[a-z_]+/, @id)
+      verb = route.verb |> to_string() |> String.upcase()
+
+      case Phoenix.Router.route_info(CourierWeb.Router, verb, path, "") do
+        %{pipe_through: pipelines} -> :idempotent in pipelines
+        _no_such_route -> false
+      end
+    end)
+    |> MapSet.new(fn route ->
+      Paths.normalise_operation(route.verb |> to_string() |> String.upcase(), route.path)
+    end)
+  end
+
+  defp idempotent_in_router?(operation) do
+    MapSet.member?(guarded_operations(), operation)
+  end
+
+  # Provokes the 409 that only exists when a key is presented twice. The first
+  # request has to *succeed*, or its claim is released and the second is a fresh
+  # request rather than a replay — which is the point of the test either way, so
+  # this asserts the first one was a 2xx before reading the second.
+  defp idempotency_conflict({method, path} = operation) do
+    url = fill(path, @id)
+    key = "11111111-1111-1111-1111-111111111111"
+    conn = put_req_header(build_conn(), "x-courier-account", @account)
+
+    first =
+      conn |> put_req_header("idempotency-key", key) |> send(method, url, conflict_body("a"))
+
+    second =
+      conn |> put_req_header("idempotency-key", key) |> send(method, url, conflict_body("b"))
+
+    unless first.status in 200..299 do
+      raise """
+      #{label(operation)} answered #{first.status} to the first request carrying an \
+      `Idempotency-Key`, so no response was stored and the second request cannot be a \
+      replay. The 409 check below needs the first one to be a 2xx: a request that did not \
+      succeed releases its key on purpose, so that a client which fixed the request and \
+      retried with the same key gets its new answer rather than a 409.
+      """
+    end
+
+    _ = operation
+    body(second)
+  end
+
+  # Two bodies that mean different things, so the second is a *reuse* rather than
+  # a retry. The url is what differs, and it is a field the create action reads.
+  defp conflict_body(suffix) do
+    %{url: "https://hooks.example.com/idempotency-#{suffix}"}
   end
 
   # --- helpers ----------------------------------------------------------------

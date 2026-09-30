@@ -13,6 +13,17 @@ defmodule CourierWeb.Router do
     plug CourierWeb.Plugs.Principal
   end
 
+  # `Idempotency-Key`, on the mutating POSTs and nothing else. Core requires it on
+  # a POST that can be retried safely, which is these two and not the other four
+  # actions: `GET` and `DELETE` are idempotent by HTTP's definition, and `PATCH`
+  # here is a partial update whose repeat is already the same row.
+  #
+  # After `:authenticated` on purpose — the key is scoped to the principal, so it
+  # cannot be claimed before courier knows who is asking.
+  pipeline :idempotent do
+    plug CourierWeb.Plugs.Idempotency
+  end
+
   # Probes. Deliberately outside /api and outside every other pipeline: they run
   # before routing, auth, and the rest of the platform exist, so they must not
   # depend on any of it. See CourierWeb.HealthController.
@@ -45,10 +56,20 @@ defmodule CourierWeb.Router do
     pipe_through [:api, :authenticated]
 
     get "/webhook_endpoints", WebhookEndpointsController, :index
-    post "/webhook_endpoints", WebhookEndpointsController, :create
     get "/webhook_endpoints/:id", WebhookEndpointsController, :show
     patch "/webhook_endpoints/:id", WebhookEndpointsController, :update
     delete "/webhook_endpoints/:id", WebhookEndpointsController, :delete
+  end
+
+  # The same resource, on the two POSTs. A separate scope rather than one
+  # pipeline over all six, because the header is for a POST that can be retried
+  # and putting it on the other four would claim an idempotency courier does not
+  # provide — `test/courier_web/router_test.exs` asserts `:authenticated` on
+  # every action, and this keeps that true while adding the second pipeline.
+  scope "/v1", CourierWeb do
+    pipe_through [:api, :authenticated, :idempotent]
+
+    post "/webhook_endpoints", WebhookEndpointsController, :create
     post "/webhook_endpoints/:id/test", WebhookEndpointsController, :ping
   end
 
