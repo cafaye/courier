@@ -41,7 +41,7 @@ config :swoosh, api_client: false
 # nothing else is scheduled yet.
 config :courier, Oban,
   repo: Courier.Repo,
-  queues: [outbox: 10]
+  queues: [outbox: 10, webhooks: 5]
 
 # Outbox relay tuning. Read at runtime, not compiled in, so a deployment can
 # change batch size without a rebuild.
@@ -71,7 +71,17 @@ config :courier, :webhooks,
   circuit_threshold: 5,
   # The attempt timeout. Spec §Request timeouts asks for 15–30s; the low end,
   # because a delivery holding a worker is a delivery nobody else gets.
-  timeout_ms: 15_000
+  timeout_ms: 15_000,
+  connect_timeout_ms: 5_000,
+  # How many outbox events one dispatch run fans out. Bounded so a large backlog
+  # is worked through in batches rather than in one transaction that holds row
+  # locks across the whole table.
+  dispatch_batch_size: 100,
+  # How many due deliveries one send run attempts. Bounded for the same reason,
+  # and smaller than the dispatch batch because each of these makes a network call
+  # and a hundred concurrent requests to a hundred different customers is a burst
+  # courier's own egress gets shaped for.
+  delivery_batch_size: 25
 
 # The resolver the SSRF guard checks addresses with. Overridden in test so a URL
 # check never depends on what a real resolver says about a real name.

@@ -57,3 +57,9 @@ config :courier, :secret_box_key, "Y291cmllci10ZXN0LW9ubHkta2V5LTMyLWJ5dGVzISE="
 # between a laptop and CI. `{module, argument}` is the guard's convention for a
 # resolver that needs to be told something.
 config :courier, :dns_resolver, {Courier.TestSupport.TestDns, {:canned, ["93.184.216.34"]}}
+
+# Webhook delivery in test goes to a double that records the request instead of
+# opening a socket, so the assertions about what courier signs and sends are
+# assertions about courier and not about a listener's timing. See
+# `test/support/recording_sender.ex`.
+config :courier, :webhook_sender, Courier.TestSupport.RecordingSender

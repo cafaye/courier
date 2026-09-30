@@ -232,6 +232,23 @@ defmodule Courier.WebhookEndpoints do
   end
 
   @doc """
+  Disables an endpoint and records why.
+
+  For the cases courier decides on its own, outside the consecutive-failure
+  count: a receiver answering `410 Gone`, which the spec §Delivery success and
+  failure says should disable the endpoint outright. The count is not touched —
+  nothing is known about how many failures there were — but the reason is
+  written, because "delivery stopped" with nothing to explain it is not an answer
+  a customer can act on.
+  """
+  @spec disable(WebhookEndpoint.t(), String.t()) :: result()
+  def disable(%WebhookEndpoint{} = endpoint, reason) do
+    endpoint
+    |> Ecto.Changeset.change(status: :disabled, disabled_reason: reason)
+    |> Repo.update()
+  end
+
+  @doc """
   Records a successful delivery: the failure count returns to zero.
 
   An endpoint courier disabled for its own reasons is re-enabled, because a

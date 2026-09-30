@@ -49,7 +49,13 @@ defmodule Courier.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:swoosh, "~> 1.28"},
-      {:oban, "~> 2.24"}
+      {:oban, "~> 2.24"},
+      # Webhook delivery needs an HTTP client. Req is the one this repository's own
+      # generated rules name as preferred ("Use the already included and available
+      # `:req` (`Req`) library for HTTP requests, avoid `:httpoison`, `:tesla`, and
+      # `:httpc`"), so the webhook pipeline uses it rather than `:httpc` from OTP or
+      # a second client library.
+      {:req, "~> 0.5"}
     ]
   end
 

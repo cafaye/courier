@@ -169,6 +169,7 @@ defmodule Courier.WebhookDeliveries do
     record(endpoint, event_id, fn delivery ->
       attempt = delivery.attempt + 1
       retryable? = Keyword.get(attrs, :retryable?, true)
+      retry_after = Keyword.get(attrs, :retry_after)
 
       changes =
         [
@@ -178,22 +179,44 @@ defmodule Courier.WebhookDeliveries do
           attempted_at: DateTime.utc_now(),
           attempt: attempt
         ]
-        |> put_next_attempt(attempt, retryable?)
+        |> put_next_attempt(attempt, retryable?, retry_after)
 
       Ecto.Changeset.change(delivery, changes)
     end)
   end
 
   # The whole budget policy, in one place: a failure that will fail again is not
-  # retried, and neither is one that has run out of attempts.
-  defp put_next_attempt(changes, attempt, retryable?) do
+  # retried, neither is one that has run out of attempts, and a consumer that sent
+  # a `Retry-After` is waited for at least that long.
+  defp put_next_attempt(changes, attempt, retryable?, retry_after) do
     if retryable? and attempt < config()[:max_attempts] do
       Keyword.merge(changes,
         status: :failed,
-        next_attempt_at: DateTime.add(DateTime.utc_now(), backoff(attempt), :second)
+        next_attempt_at: DateTime.add(DateTime.utc_now(), wait(attempt, retry_after), :second)
       )
     else
       Keyword.merge(changes, status: :exhausted, next_attempt_at: nil)
+    end
+  end
+
+  # §Delivery success and failure: a `retry-after` "should be taken into
+  # consideration when scheduling the next attempt". Considered as a *floor*, not
+  # a replacement: a receiver asking for five seconds does not get courier
+  # hammering it in five seconds when the schedule already said five minutes, and
+  # a receiver asking for an hour is not retried before the hour is up.
+  #
+  # Capped at the backoff ceiling, because a `Retry-After` is a number a consumer
+  # wrote and courier is not obliged to obey one that is longer than courier's
+  # whole budget — a typo of `36000` would otherwise park a delivery for ten hours.
+  defp wait(attempt, retry_after) do
+    scheduled = backoff(attempt)
+
+    case retry_after do
+      seconds when is_integer(seconds) and seconds > 0 ->
+        max(scheduled, min(seconds, config()[:backoff_cap_seconds]))
+
+      _absent ->
+        scheduled
     end
   end
 
