@@ -298,7 +298,7 @@ defmodule Courier.Webhooks.UrlGuard do
   defp path_with_query(%URI{query: nil} = uri), do: uri.path || "/"
 
   defp path_with_query(%URI{path: path, query: query}) do
-    (if path in [nil, ""], do: "/", else: path) <> "?" <> query
+    if(path in [nil, ""], do: "/", else: path) <> "?" <> query
   end
 
   defp parse_answer(answer) do
@@ -396,6 +396,7 @@ defmodule Courier.Webhooks.UrlGuard do
   defp blocked_ipv6?([0, 0, 0, 0, 0, 0xFFFF, high, low]) do
     blocked_ipv4?(high >>> 8, high &&& 0xFF, low >>> 8, low &&& 0xFF)
   end
+
   # ::/8 beyond the two above, which is all of `::`-and-up.
   defp blocked_ipv6?([0, 0, 0, 0, 0, 0, 0, _word]), do: true
   # The deprecated site-local range fec0::/10, kept out for the same reason as

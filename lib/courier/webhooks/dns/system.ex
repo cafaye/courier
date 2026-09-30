@@ -20,8 +20,11 @@ defmodule Courier.Webhooks.Dns.System do
     @records
     |> Enum.flat_map(fn record ->
       case :inet.getaddrs(host, record) do
-        {:ok, addresses} -> Enum.map(addresses, fn {address, _family} -> address |> :inet.ntoa() |> to_string() end)
-        {:error, _reason} -> []
+        {:ok, addresses} ->
+          Enum.map(addresses, fn {address, _family} -> address |> :inet.ntoa() |> to_string() end)
+
+        {:error, _reason} ->
+          []
       end
     end)
     |> case do

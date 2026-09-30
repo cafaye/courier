@@ -315,7 +315,13 @@ defmodule Courier.Webhooks.UrlGuardTest do
     end
 
     test "rejects a name that does not resolve" do
-      assert {:error, :dns_failure} == resolves_to("https://nope.example.com/x", {:error, :nxdomain})
+      assert {:error, :dns_failure} ==
+               UrlGuard.validate("https://nope.example.com/x", {TestDns, {:canned, :nxdomain}})
+    end
+
+    test "rejects a name whose resolver timed out" do
+      assert {:error, :dns_failure} ==
+               UrlGuard.validate("https://slow.example.com/x", {TestDns, {:canned, :timeout}})
     end
 
     test "rejects a name that resolves to nothing at all" do
@@ -325,6 +331,14 @@ defmodule Courier.Webhooks.UrlGuardTest do
     test "rejects an answer that is not an address at all" do
       assert {:error, :dns_failure} == resolves_to("https://weird.example.com/x", ["not-an-ip"])
     end
+
+    test "refuses rather than falling back when one answer in a list is unreadable" do
+      # A half-understood answer is not a safe answer. Reading past it — say,
+      # taking the first *parseable* address — is how a guard ends up connecting
+      # somewhere it never checked.
+      assert {:error, :dns_failure} ==
+               resolves_to("https://weird.example.com/x", ["not-an-ip", "127.0.0.1"])
+    end
   end
 
   describe "the address courier actually connects to" do
@@ -332,7 +346,11 @@ defmodule Courier.Webhooks.UrlGuardTest do
       # The guard returns the address to dial, and the sender dials *that*. If it
       # returned the hostname, the guard would be a string check with extra steps
       # and the connection would resolve a second time, unvalidated.
-      assert {:ok, target} = UrlGuard.validate("https://hooks.example.com/hooks", {TestDns, {:canned, ["8.8.8.8"]}})
+      assert {:ok, target} =
+               UrlGuard.validate(
+                 "https://hooks.example.com/hooks",
+                 {TestDns, {:canned, ["8.8.8.8"]}}
+               )
 
       assert target.host == "8.8.8.8"
       assert target.host_header == "hooks.example.com"
@@ -341,27 +359,38 @@ defmodule Courier.Webhooks.UrlGuardTest do
     end
 
     test "keeps the port the customer asked for" do
-      assert {:ok, target} = UrlGuard.validate("https://hooks.example.com:8443/hooks", {TestDns, {:canned, ["8.8.8.8"]}})
+      assert {:ok, target} =
+               UrlGuard.validate(
+                 "https://hooks.example.com:8443/hooks",
+                 {TestDns, {:canned, ["8.8.8.8"]}}
+               )
 
       assert target.port == 8443
     end
 
     test "defaults the port to the scheme's" do
-      assert {:ok, %{port: 443}} = UrlGuard.validate("https://hooks.example.com/x", {TestDns, {:canned, ["8.8.8.8"]}})
-      assert {:ok, %{port: 80}} = UrlGuard.validate("http://hooks.example.com/x", {TestDns, {:canned, ["8.8.8.8"]}})
+      assert {:ok, %{port: 443}} =
+               UrlGuard.validate("https://hooks.example.com/x", {TestDns, {:canned, ["8.8.8.8"]}})
+
+      assert {:ok, %{port: 80}} =
+               UrlGuard.validate("http://hooks.example.com/x", {TestDns, {:canned, ["8.8.8.8"]}})
     end
 
     test "keeps the host header the name, not the address, because that is what the customer serves" do
       # A consumer's virtual host is its name. Dialling the address with a `Host`
       # of the address gets a 404 from a server that never heard of it.
-      assert {:ok, target} = UrlGuard.validate("https://hooks.example.com/x", {TestDns, {:canned, ["8.8.8.8"]}})
+      assert {:ok, target} =
+               UrlGuard.validate("https://hooks.example.com/x", {TestDns, {:canned, ["8.8.8.8"]}})
 
       assert target.host_header == "hooks.example.com"
     end
 
     test "keeps the path and the query the customer registered" do
       assert {:ok, target} =
-               UrlGuard.validate("https://hooks.example.com/hooks?tenant=acme", {TestDns, {:canned, ["8.8.8.8"]}})
+               UrlGuard.validate(
+                 "https://hooks.example.com/hooks?tenant=acme",
+                 {TestDns, {:canned, ["8.8.8.8"]}}
+               )
 
       assert target.path == "/hooks?tenant=acme"
     end
@@ -376,7 +405,11 @@ defmodule Courier.Webhooks.UrlGuardTest do
 
   describe "the url that was checked" do
     test "is the one returned, so a caller cannot send somewhere else than it validated" do
-      assert {:ok, target} = UrlGuard.validate("https://hooks.example.com/hooks", {TestDns, {:canned, ["8.8.8.8"]}})
+      assert {:ok, target} =
+               UrlGuard.validate(
+                 "https://hooks.example.com/hooks",
+                 {TestDns, {:canned, ["8.8.8.8"]}}
+               )
 
       assert target.url == "https://hooks.example.com/hooks"
     end

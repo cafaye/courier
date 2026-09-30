@@ -5,27 +5,29 @@ defmodule Courier.TestSupport.TestDns do
 
   The attack this stands in for is a public name that answers with a private
   address. Reproducing it for real would mean a name anyone can register, so the
-  answers live here: `resolve/1` returns the list for the host it was configured
-  with, and `{:canned, answers}` answers with the same list for any host.
+  answers live here:
 
-      Courier.TestSupport.TestDns.canned(["127.0.0.1"])
+      Courier.TestSupport.TestDns.resolve({:canned, ["127.0.0.1"]})
+      Courier.TestSupport.TestDns.resolve({:canned, []})          # nothing answers
+      Courier.TestSupport.TestDns.resolve({:canned, :timeout})   # the resolver failed
 
   It never calls `:inet`, so a test cannot pass or fail because of what a real
-  resolver decided about a real name.
+  resolver decided about a real name, and a `{:canned, []}` case says "the name
+  does not resolve" rather than "the name under test happens to".
   """
 
   @behaviour Courier.Webhooks.Dns
 
   @impl Courier.Webhooks.Dns
-  def resolve({:canned, answers}), do: normalize(answers)
-  def resolve({:host, host, answers}), do: if(host_is?(host, answers), do: {:ok, answers}, else: {:error, :nxdomain})
-
-  defp normalize(answers) when is_list(answers) do
-    if answers == [], do: {:error, :nxdomain}, else: {:ok, answers}
+  def resolve({:canned, answers}) when is_list(answers) do
+    # An empty answer list is a name that exists and points nowhere, which
+    # `:inet.getaddrs/2` reports the same way. courier treats it as a failure
+    # rather than as a licence to connect to whatever comes next.
+    case answers do
+      [] -> {:error, :nxdomain}
+      answers -> {:ok, answers}
+    end
   end
 
-  defp normalize(reason), do: {:error, reason}
-
-  defp host_is?({:host, host, _answers}, _answers), do: true
-  defp host_is?(_configured, _answers), do: false
+  def resolve({:canned, reason}), do: {:error, reason}
 end
