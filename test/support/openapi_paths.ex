@@ -188,15 +188,15 @@ defmodule Courier.TestSupport.OpenAPIPaths do
   def diff(document, router, exclusions \\ %{}) do
     document_keys = MapSet.new(Map.keys(document))
     router_keys = MapSet.new(Map.keys(router))
+    excluded_keys = MapSet.new(Map.keys(exclusions))
     served = difference(router, router_keys, document_keys)
-
-    split = Enum.split_with(served, &MapSet.member?(MapSet.new(Map.keys(exclusions)), key(&1)))
+    {explained, unexplained} = Enum.split_with(served, &MapSet.member?(excluded_keys, key(&1)))
 
     %{
       documented_not_served: difference(document, document_keys, router_keys),
       served_not_documented: served,
-      unexplained: split |> elem(1) |> Enum.map(& &1),
-      excluded: split |> elem(0) |> Enum.map(&Map.put(&1, "reason", exclusions[key(&1)]))
+      unexplained: unexplained,
+      excluded: Enum.map(explained, &Map.put(&1, "reason", exclusions[key(&1)]))
     }
   end
 
