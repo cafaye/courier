@@ -10,11 +10,24 @@
 # UNRESOLVED, and deliberately not guessed here:
 #   - `core: ^0.1.0` assumes core's first release is 0.1.0. If it lands as 0.2.0
 #     this line is wrong and CI's pin will not resolve.
-#   - `exposes.api` now points at `openapi.yaml` (courier-03), which documents
-#     `/v1/webhook_endpoints`. The notification preferences routes are in the
-#     router and in the tests but NOT yet in that document, so the document is
-#     incomplete rather than wrong; a route that exists and is undocumented will
-#     be caught by the contract lint when it enforces that direction.
+#   - `exposes.api` points at `openapi.yaml`, which as of courier-05 documents
+#     every route the router serves except `/healthz` and `/readyz`, and says so
+#     in its own header. It used to be partial — courier-03 left
+#     `/v1/notification_preferences/{user_id}` out of the document deliberately
+#     and said so — so the direction in which a route could exist undocumented
+#     was unenforced. It is enforced now, in both directions, by
+#     `test/courier_web/openapi_document_test.exs`, which reads this document and
+#     `lib/courier_web/router.ex` and fails if they disagree. The two probes are
+#     the only omission, they are named in the document's header and in the test's
+#     exclusion list with the reason, and the test fails if that list stops naming
+#     a route the router serves.
+#   - The two `notification_preferences` operations are documented as served
+#     WITHOUT authentication, because that is what the router does. Core's
+#     conventions ask for required scopes on every operation, so this is a
+#     disagreement with the contract and not a settled fact; it is a
+#     `> DECISION NEEDED (courier-05)` in `openapi.yaml`'s header, and closing it
+#     after a customer has generated a client is a major `info.version` bump and a
+#     regenerated SDK. Authenticate them before anyone integrates.
 #   - `consumes` is empty. courier is not subscribed to anything yet; when it
 #     starts reacting to identity or billing events this is the list, and every
 #     entry has to come with an idempotent consumer, because delivery is

@@ -18,6 +18,28 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
 
 ### Added
 
+- **`openapi.yaml` and the router are now held to each other by a test, in both
+  directions.** `test/courier_web/openapi_document_test.exs` reads the document
+  and `CourierWeb.Router.__routes__/0` and fails if either describes an operation
+  the other does not. It compares **paths, never counts** — a count comparison
+  passes on a rename and fails on a pure addition, which is backwards — and its
+  readers raise rather than under-read, because two readers that both find
+  nothing agree with each other and a green check over nothing is worse than no
+  check. The route set comes from the router's own definitions rather than a
+  list written out in a test, which is the shape that can only fail for a name
+  somebody remembered. `/healthz` and `/readyz` are the only omission: they are
+  named in the document's header and in the test's exclusion list with the
+  reason, keyed by method *and* path so a carve-out cannot cover a second method
+  on the same path, and the test fails if that list stops naming a route the
+  router actually serves.
+- **`GET` and `PUT /v1/notification_preferences/{user_id}` are now in
+  `openapi.yaml`.** They were in the router with tests behind them and absent
+  from the document, which courier-03 flagged rather than leaving quietly; that
+  was the right call and this closes it. The document's operation count goes
+  from 6 to 8 and `info.version` from `1.1.0` to `1.2.0` — a minor bump, since
+  nothing that already existed changed shape. The document no longer describes
+  itself as partial: it now covers every route except the two probes, and both
+  it and `test/courier_web/openapi_document_test.exs` say so.
 - **CI, and it calls `cafaye/kit` rather than copying it** —
   `.github/workflows/ci.yml` is a six-line `uses:` for kit's reusable workflow
   plus the two jobs kit cannot own. It is the first CI this repository has had:
@@ -39,12 +61,12 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
     prime that resolves differently lets two worktrees disagree about one commit,
     and a green suite cannot see that.
   - **The release and its boot contract** — `mix release` on the pinned
-    toolchain (the only thing here that compiles in `:prod`), then three
-    assertions: the release refuses to boot without `COURIER_SECRET_BOX_KEY` and
-    names it, accepts a test-only key and then refuses on `DATABASE_URL`, and
-    with both set seals under the key it was given. The key used there is a
-    test-only fixture; nothing in `config/runtime.exs` reads a default, and the
-    first assertion is the proof.
+  toolchain (the only thing here that compiles in `:prod`), then three
+  assertions: the release refuses to boot without `COURIER_SECRET_BOX_KEY` and
+  names it, accepts a test-only key and then refuses on `DATABASE_URL`, and
+  with both set seals under the key it was given. The key used there is a
+  test-only fixture; nothing in `config/runtime.exs` reads a default, and the
+  first assertion is the proof.
 - **`bin/assert-suite`** — asserts a `mix test` run executed everything it
   reports. It accepts exactly one shape of ExUnit's summary (`Result: N passed`)
   and fails on a fraction, on a skipped or excluded count, and on `0 tests`, so a
@@ -53,7 +75,6 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
   builds with the toolchain `mise install` gives a developer, and checks kit's
   `versions:` input against the same file, so the one version literal GitHub
   cannot avoid cannot drift into a second toolchain.
-
 - **Outbound webhooks, signed per [Standard Webhooks](https://www.standardwebhooks.com)**
   — PLAN.md §7 adopted the spec with "No custom scheme", so a consumer verifies a
   courier delivery with an official library (Svix's, Twilio's, Kong's,
@@ -135,6 +156,17 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
 
 ### Security
 
+- **The two `notification_preferences` operations are documented as served
+  without authentication** (`security: []`), because that is what the router
+  does: they are in the `:api` pipeline only, and the gap is recorded in
+  `CourierWeb.NotificationPreferencesController`'s moduledoc and pinned by
+  `router_test.exs`. Core's `docs/openapi-conventions.md` asks for required
+  scopes on every operation, so this is a disagreement with the contract rather
+  than a settled fact, and it is a `> DECISION NEEDED (courier-05)` in the
+  document's header. **It should be closed before a customer generates a client
+  from this document**: a client built against `security: []` sends no token, so
+  authenticating them later is a major `info.version` bump and a regenerated SDK
+  for everyone who already did.
 - **The retry budget is bounded, in two places** (PLAN.md §7). A delivery is
   attempted at most 8 times: 5 minutes apart at first, doubling, capped at 6 hours,
   with jitter drawn from the headroom *under* the cap. A full budget spans about
