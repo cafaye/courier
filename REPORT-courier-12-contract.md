@@ -1,6 +1,7 @@
 # REPORT — courier-12: the error envelope, and everything the document did not say
 
-Branch `worker/courier-12-contract`. Base `35c6a27`. Not pushed.
+Branch `worker/courier-12-contract`. Base `4711e54` (the `recover(...)` commit the
+re-dispatch started from). Not pushed.
 
 The brief: courier declares the RFC 9457 error envelope in `components` and wires
 it to no response; six of the nine reserved codes never appear; two mutating POSTs
@@ -147,10 +148,11 @@ acceptable"}`. See §4.
 the file and line, because a response wired to nothing is the exact shape this
 packet is about.
 
-**`test/courier_web/openapi_error_responses_test.exs`** — new, 18 tests. **The two
-existing tests stay exactly as they were**; nothing was weakened, no assertion
-loosened, no sleep added, no retry raised. `openapi_paths_test.exs` grew 12 reader
-tests (258 lines) covering the response reader, each on a synthetic document.
+**`test/courier_web/openapi_error_responses_test.exs`** — new, **18** tests (ExUnit's own
+count). **The two existing tests stay exactly as they were**; nothing was weakened,
+no assertion loosened, no sleep added, no retry raised. `openapi_paths_test.exs`
+grew **11** reader tests — 40 to 51, 258 lines added and 0 removed — each on a
+synthetic document.
 
 ---
 
@@ -213,9 +215,13 @@ was measured over a socket; it does not claim to re-measure it there.
 
 ## 7. The gate
 
-`mise run prime` → **`Result: 564 passed`**, exit 0. **0 skipped, 0 excluded** —
-reported separately because a skip is a hole in the claim, and this packet adds 30
-tests to a suite that reports none.
+`mise run prime` → **`Result: 564 passed`**, exit 0.
+
+**Pass count: 564. Skip count: 0.** Reported separately because a skip is a hole in
+the claim. The gate output contains no `skipped`, no `excluded` and no `invalid`
+line, and `git diff --exit-code -- mix.lock` is clean, so the gate did not move the
+lockfile. Baseline was **535 passed, 0 skipped**, so this packet adds **29**
+tests — every one a real assertion, none a probe.
 
 | Tier | Measured | Floor | `bin/assert-suite` |
 |---|---|---|---|
@@ -259,11 +265,45 @@ Five faults injected, each reverted:
 - No token, key or JWT appears in this report, the document, or any test. The one
   test-local account id is a fixed uuid, not a credential.
 
-## 9. Commits
+## 9. A note on this worktree, because a reviewer will notice the commit is not one worker's
 
-Two on `worker/courier-12-contract`, neither pushed:
+**Another process was writing to this worktree while this packet ran.** The first
+interrupted run left `test/probe_*_test.exs` committed in `4711e54`; a second
+writer then modified `openapi.yaml`, `test/support/openapi_paths.ex`,
+`test/courier_web/openapi_error_responses_test.exs` and this report *while I was
+editing them*, and rewrote `openapi.yaml` three times inside a minute. Two of my
+`git stash push`/`pop` pairs were lost to that churn and had to be reconstructed
+from `git show stash@{0}:<path>` into a temp directory rather than through git
+state operations.
+
+What that means for a reviewer:
+
+* **The document and the checks in `4b134ae` are the agreed result of two passes,
+  not one.** That is why `400` is *removed* from `GET /v1/notification_preferences`
+  and *added* to `DELETE /v1/webhook_endpoints` — the second pass measured
+  `Plug.Parsers` instead of assuming its verb list (§2).
+* **Every number in this report was re-measured after the last write**, by me, on
+  the committed tree: whole suite 564, no-database tier 252, database tier 312,
+  SSRF 62, `mix.lock` unchanged, and the two fault injections in §7 re-run and
+  confirmed to fail 2 tests each. Where this report and an earlier draft of it
+  disagree, this one is the one that was measured.
+* One consequence was chased down rather than left: an **intermittent** six-test
+  failure in `webhook_endpoints_test.exs` and `webhook_endpoints_config_test.exs`
+  (`Repo.aggregate(WebhookEndpoint, :count) == 0` finding 1) that appeared in one
+  run in nine and never again. Those same six fail on the **base commit** when the
+  database tier runs in isolation, and `psql` confirms **0 rows committed** after
+  every run, so it is a latent isolation weakness in those two files and not an
+  escape by this packet. It is worth a packet of its own; it is not this one.
+
+## 10. Commits
+
+Three on `worker/courier-12-contract`, none pushed:
 
 1. `4711e54` — recovery of work left uncommitted when the machine OOM'd. Probe
    scaffolding only; its conclusions were re-measured from scratch before anything
    was built on them.
-2. The commit this report accompanies.
+2. `4b134ae` — the work: the document, the one code fix, the response reader, the
+   new check, the raised floors, this report.
+3. This commit — the CHANGELOG entry for the `400` correction and the three report
+   figures that were re-measured on the committed tree (§9 explains why there was
+   a third).

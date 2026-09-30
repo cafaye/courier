@@ -26,10 +26,22 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
   reproduce, and what this closes, is the version of the same defect one level
   down: **every one of the eight operations could answer a `500` and a `406`, and
   none of them declared either.** A client generated from this document had no
-  way to learn that. All eight now declare both, `400` is declared on all three
-  methods that carry a body, and `info.version` goes `1.2.0` → `1.3.0` — a minor
-  bump, because no path changed, no operation was added or removed, and no
-  request or response that already existed changed shape.
+  way to learn that. All eight now declare both, and `info.version` goes
+  `1.2.0` → `1.3.0` — a minor bump, because no path changed, no operation was
+  added or removed, and no request or response that already existed changed
+  shape.
+  - **`400` moved in both directions, because the parser's verb list is not the
+    one it looks like.** `Plug.Parsers` reads a body for `POST`, `PUT`, `PATCH`
+    **and `DELETE`**, so `DELETE /v1/webhook_endpoints/{id}` was reachable at
+    400 and declared nothing — a client that sends a body with its delete gets a
+    response no document described. The mirror of that was already wrong in the
+    document: `GET /v1/notification_preferences/{user_id}` declared a 400, and
+    `Plug.Parsers` **does not read a body on a `GET`**, so that 400 is
+    unreachable and a client generated from it writes a branch that can never
+    run. The 400 is removed there and added to the delete. The new check compares
+    the document against the parser in **both** directions — declared ⇒ reachable
+    and reachable ⇒ declared — for every operation, which is how both halves were
+    found.
   - **`test/courier_web/openapi_error_responses_test.exs` is the new check**, and
     it is the language-specific half a neutral harness cannot be: it provokes
     each status against the running endpoint and asks the document whether it
