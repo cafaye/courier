@@ -77,6 +77,13 @@ test/courier/webhooks/sender_test.exs          the request and its classificatio
 test/courier/workers/                 the relay, the fan-out, and the sender
 test/courier_web/controllers/          the API, and the authorization matrix
 test/courier_web/router_test.exs      which controller, which scope, which methods
+test/courier_web/openapi_document_test.exs  openapi.yaml against the router, both
+                                           directions, and why the probes are
+                                           the only omission
+test/courier_web/openapi_paths_test.exs     the reader, a test per normalisation,
+                                           and the comparison with faults injected
+test/support/openapi_paths.ex        the reader and the comparison the two above
+                                    are built on; copy this file, not a shared kit
 test/support/recording_sender.ex      a sender that records instead of sending
 test/support/header_resolver.ex       a principal that reads a header
 test/support/test_dns.ex              a resolver that answers from a table
@@ -122,6 +129,28 @@ be `async: false` and say why in a comment above `use`. The same goes for a test
 that changes application env, which the whole VM shares: those live in their own
 `*ConfigTest` file, as `ProcessOutboxWorkerConfigTest`,
 `WebhookEndpointsConfigTest` and `DeliverWebhookWorkerBudgetTest` do.
+
+**`openapi.yaml` and the router are held to each other by a test, in both
+directions.** `test/courier_web/openapi_document_test.exs` reads the document and
+`CourierWeb.Router.__routes__/0` and fails if they disagree — an operation in the
+document the router does not serve, *or* a route the router serves the document
+does not describe. Both are failures, not warnings: a warning nobody acts on is a
+note in a file nobody reads, and PLAN.md MD6 has the platform generating client
+SDKs from this document, so an omission here is a method a generated client will
+not have. The only omission is `/healthz` and `/readyz`, named in the document's
+header and in the test's exclusion list with the reason, and the test fails if
+that list stops naming a route the router serves.
+
+It compares **paths**, never counts: a count comparison passes on a rename and
+fails on an addition, which is backwards. The readers raise rather than
+under-read, because a document reader that finds nothing and a router reader that
+finds nothing agree with each other, and a green check over nothing is worse than
+no check. **A route added to `router.ex` is not finished until it is in
+`openapi.yaml`, and an operation added to `openapi.yaml` is not finished until
+the router serves it.** A `> DECISION NEEDED (courier-05)` is open in the
+document's header: the two `notification_preferences` operations are served
+unauthenticated, and documenting them that way is a fact about the code, not an
+endorsement of it.
 
 **A webhook signature is not courier's to invent.** PLAN.md §7 adopted [Standard
 Webhooks](https://www.standardwebhooks.com) and said "No custom scheme", which

@@ -1,22 +1,40 @@
 # courier's HTTP surface, per cafaye/core/docs/openapi-conventions.md.
 #
-# What is here and what is not is deliberate. `/v1/webhook_endpoints` is
-# documented because it is the first surface courier ships with a contract a
-# customer codes against. `GET` and `PUT /v1/notification_preferences/:user_id`
-# exist in the router and are covered by tests, and are *not* here — a document
-# that claims to describe courier and omits half of it is worse than one that
-# says what it covers. They are the next thing this file grows.
-#
-# `/healthz` and `/readyz` are not spec'd: they are infrastructure probes that run
+# This file now describes every route courier's router serves except two, and the
+# two are named here: `/healthz` and `/readyz` are infrastructure probes that run
 # before auth, routing and the rest of the platform exist, and no customer codes
-# against them.
+# against them. A document that claims to describe courier and quietly omits part
+# of it is worse than one that says what it covers — which is why the omissions
+# are declared in this header *and* enforced by
+# `test/courier_web/openapi_document_test.exs`, which fails if this file and
+# `lib/courier_web/router.ex` disagree in either direction.
+#
+# `GET` and `PUT /v1/notification_preferences/{user_id}` were in the router with
+# tests behind them and absent from here, which is the drift this file's check now
+# prevents from recurring. They are the other half of the public surface, not an
+# afterthought, and they are documented as thoroughly as the webhooks.
+#
+# > DECISION NEEDED (courier-05): the two notification-preferences operations are
+# > served **unauthenticated**, and this document says so with `security: []`
+# > rather than claiming a scheme courier does not enforce. `router.ex` puts them
+# > in the `:api` pipeline only, and the gap is recorded in
+# > `CourierWeb.NotificationPreferencesController`'s moduledoc and pinned by
+# > `test/courier_web/router_test.exs`. Core's conventions ask for required
+# > scopes on every operation, so either courier authenticates them or the
+# > convention needs an exception for per-user settings whose tenant is in the
+# > path. Recommendation: authenticate them in a later packet, before a customer
+# > integrates against this document — a generated client built from `security:
+# > []` will send no token, so closing it later is a breaking change to the
+# > contract. Cost of flipping now: one scope name and the plug in a scope block.
+# > Cost of flipping later: a major `info.version` and every generated client.
 openapi: 3.1.0
 
 info:
   # The document's own semantic version, which moves with the document and not
   # with the `/v1` prefix. The prefix changes only on a breaking change, and then
-  # this number changes in the same commit.
-  version: 1.1.0
+  # this number changes in the same commit. This is a minor bump: two operations
+  # were added, nothing that exists changed shape.
+  version: 1.2.0
   title: caFaye courier
   description: |
     Transactional email, notification preferences, and outbound webhooks.
@@ -43,11 +61,119 @@ tags:
     description: |
       Where an account registers the URLs courier delivers events to, and the
       signing secrets those deliveries are signed with.
+  - name: notification preferences
+    description: |
+      What a user has been asked to receive, per notification type and per channel.
+      Silence is not consent: a user courier has never seen, or a type a user has
+      never mentioned, is on.
 
 security:
   - bearerAuth: []
 
 paths:
+  /v1/notification_preferences/{user_id}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+
+    get:
+      tags: [notification preferences]
+      operationId: getNotificationPreferences
+      summary: What this user has been asked to receive
+      description: |
+        Every notification type courier sends, with this user's stored answers
+        filled in and the defaults used where there are none. A `GET` never writes.
+
+        **An unknown user is a 200, not a 404.** identity owns the user table.
+        courier is asked about a user id and answers with that user's
+        preferences, which for a user who has never touched the settings is
+        three types, all on. A 404 would be courier claiming to know something
+        about the requester it does not know.
+
+        Served without authentication — see this document's header, which records
+        the gap and why it is not quietly written over here.
+      security: []
+      responses:
+        '200':
+          description: Every notification type, with this user's answers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/NotificationPreferences' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+    put:
+      tags: [notification preferences]
+      operationId: updateNotificationPreferences
+      summary: Apply a batch of preferences
+      description: |
+        Stores a batch and answers with the state the user now has — the same
+        shape a `GET` returns, so a settings page does not have to follow a write
+        with a read to render.
+
+        **A rejected batch writes nothing.** The entries are validated together
+        before any of them is stored, so a typo in the third entry cannot leave
+        the first two applied and the user looking at a half-saved settings page.
+        Applying the same batch twice is the same answer: this operation is
+        idempotent by construction, because it stores the state it is given rather
+        than accumulating deltas.
+
+        `user_id` comes from the path and is never read from the body. A body
+        that names a different user cannot write that user's preferences.
+
+        Served without authentication — see this document's header.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [preferences]
+              properties:
+                preferences:
+                  type: array
+                  minItems: 1
+                  description: |
+                    The entries to store. A type or channel not named here is left
+                    alone, so a client that knows about one setting can send one
+                    entry without overwriting the rest.
+                  items:
+                    type: object
+                    required: [notification_type]
+                    properties:
+                      notification_type:
+                        $ref: '#/components/schemas/NotificationType'
+                      email_enabled:
+                        type: boolean
+                        default: true
+                      push_enabled:
+                        type: boolean
+                        default: true
+                        description: |
+                          Stored and returned because the API is the user's
+                          settings, but nothing sends push, so a `true` here does
+                          not mean courier will send a push.
+            examples:
+              - preferences:
+                  - notification_type: welcome
+                    email_enabled: false
+      responses:
+        '200':
+          description: The stored state, the same shape a `GET` returns
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/NotificationPreferences' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
   /v1/webhook_endpoints:
     get:
       tags: [webhook endpoints]
@@ -272,6 +398,17 @@ components:
         about roles and checks scopes itself.
 
   parameters:
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      description: |
+        A uuid from identity. courier does not own users and holds no foreign key
+        to them, so this is checked for *shape* and nothing else: a non-uuid is a
+        422 before the body is looked at, and a well-formed id courier has never
+        seen is a 200 with the defaults.
+      schema: { type: string, format: uuid }
+
     EndpointId:
       name: id
       in: path
@@ -297,6 +434,45 @@ components:
       schema: { type: string }
 
   schemas:
+    NotificationType:
+      type: string
+      enum: [welcome, password_reset, team_invitation]
+      description: |
+        Every notification type courier sends. A type outside this list is a 422
+        naming `preferences[0].notification_type`, because a preference for
+        something courier will never send is a setting page that lies to the user.
+
+    NotificationPreference:
+      type: object
+      required: [notification_type, email_enabled, push_enabled]
+      properties:
+        notification_type: { $ref: '#/components/schemas/NotificationType' }
+        email_enabled:
+          type: boolean
+          description: |
+            Whether courier will send this type to this user by email. Defaults
+            to true: silence is not consent.
+        push_enabled:
+          type: boolean
+          description: |
+            Stored and returned so the answer is complete, but nothing sends push
+            — a `true` here does not mean courier will send a push.
+
+    NotificationPreferences:
+      type: object
+      required: [user_id, preferences]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          description: The user these preferences are for, as the path named them.
+        preferences:
+          type: array
+          description: |
+            Every notification type, always all of them and never a subset: a
+            settings page should not have to guess what it has not been told.
+          items: { $ref: '#/components/schemas/NotificationPreference' }
+
     WebhookEndpointStatus:
       type: string
       enum: [enabled, disabled]
@@ -386,6 +562,22 @@ components:
                 enum: [invalid_format, taken, blocked_scheme, blocked_host, blocked_address, dns_failure]
 
   responses:
+    BadRequest:
+      description: |
+        The body was not the shape courier was sent. This is 400 and not 422
+        because a client could not have known: the request never parsed, so
+        there is no field to name and nothing to correct.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/bad_request
+            title: Bad request
+            status: 400
+            detail: The request body was not valid JSON.
+            code: bad_request
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
     Unauthorized:
       description: |
         No authenticated caller. courier does not guess an account for an
