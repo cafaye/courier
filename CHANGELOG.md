@@ -154,6 +154,42 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
   version control that every deployment that forgot to set one would seal its
   customers' credentials under.
 
+### Changed
+
+- **One postgres image across the platform: courier moves to
+  `postgres:17-alpine`.** The two places that actually pin the image —
+  `docker-compose.yml`'s `db` service and the `services: postgres` block in
+  `.github/workflows/ci.yml` — now carry the same string, character for
+  character, and `gate.yml`'s database requirement names it too, so a local
+  `docker compose up` and a CI gate run are the same server. Previously both
+  pinned `postgres:17`, the debian image: 477MB against alpine's 291MB, and it
+  was the only postgres variant left in a local cache where every *running*
+  database container was already `postgres:17-alpine` — so the next
+  `compose up` re-pulled an image the platform had standardized away from.
+  The two pins never disagreed with each other; they disagreed with the
+  platform, which is the same defect wearing a different hat.
+  - **Booted, migrated from scratch, and the database tier run on it** — not a
+    comment. All six migrations applied to an empty alpine server, and every
+    tier green: 535 in the whole suite via `bin/prime` unmodified, 241 in the
+    no-database tier, 294 in the database tier, 62 in the SSRF table. Zero
+    skipped, zero excluded, and no tier is gated on an environment variable.
+  - **The musl/collation question, answered rather than assumed.** Alpine's
+    postgres is musl (`aarch64-unknown-linux-musl`, Alpine 3.24.2) and its
+    databases report `datlocprovider = c`, which means the `en_US.utf8` in
+    `datcollate` is a nominal locale name and not glibc's Unicode-aware
+    ordering. The orderings genuinely differ — `Apple Banana Zebra _underscore
+    apple` under musl's `c` provider against `_underscore apple Apple banana`
+    under `en-US-x-icu`. **Nothing in courier depends on the difference**, and
+    the reason is structural rather than lucky: all eight `order_by` clauses in
+    `lib/` order on `inserted_at`, `occurred_at`, `next_attempt_at` or `id` and
+    never on a user-supplied text column; every text-ordering assertion in the
+    suite is an `Enum.sort` in the BEAM, whose order for binaries is byte order
+    and does not go through libc at all; and the one text column in a unique
+    index (`webhook_endpoints.url`) is compared with `=`, which is byte
+    equality and therefore collation-independent. A future `ORDER BY` on a
+    customer-supplied string is where this would start to bite, and the finding
+    is recorded rather than papered over so the next reader knows the floor.
+
 ### Security
 
 - **The two `notification_preferences` operations are documented as served

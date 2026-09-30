@@ -122,10 +122,12 @@ jobs:
 
     services:
       postgres:
-        # Pinned to the major in docker-compose.yml. An unpinned `postgres`
-        # means the suite's result depends on which tag was cached when the job
-        # started.
-        image: postgres:17
+        # The same string docker-compose.yml pins, character for character. An
+        # unpinned `postgres` means the suite's result depends on which tag was
+        # cached when the job started, and a *different* tag than the compose
+        # service means CI and a developer's laptop disagree about the server
+        # the 294 database-tier tests ran against.
+        image: postgres:17-alpine
         env:
           # The credentials config/test.exs hard-codes, so `mix ecto.setup` and
           # every sandbox checkout find the server they were written for.

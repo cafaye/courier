@@ -121,14 +121,15 @@ external:
       name: >-
         PostgreSQL at localhost:5432 as postgres/postgres, the credentials
         config/test.exs hard-codes. docker-compose.yml carries the same
-        postgres:17 service on the same port and credentials.
+        postgres:17-alpine service on the same port and credentials.
       satisfy:
         # A bare name is a claim about THIS MACHINE, so the checker reports
         # `gate.requirement-unproven` and deliberately leaves the exit code
         # alone. That is the correct severity: a checker that failed on it
         # would be red on a laptop and green on CI. docker-compose.yml in this
-        # repository carries the same postgres:17 service on the same port and
-        # the same credentials, so `docker compose up -d db` satisfies it here.
+        # repository carries the same postgres:17-alpine service on the same
+        # port and the same credentials, so `docker compose up -d db` satisfies
+        # it here.
         command: [docker, compose, up, -d, db]
         unmet: >-
           mix ecto.setup exits nonzero with a Postgrex/ConnectionError, or the

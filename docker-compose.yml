@@ -14,7 +14,15 @@ name: courier
 
 services:
   db:
-    image: postgres:17
+    # The platform image, and the only postgres variant courier names. One
+    # image fleet-wide: the compose service, the CI `services:` block, and
+    # gate.yml's database requirement all pin this exact string, so a local
+    # `compose up` and a CI gate run are the same server. `17-alpine` rather
+    # than plain `17` because alpine is what every running database container
+    # already uses and it is the smallest current-major variant — the debian
+    # `17` image is 477MB against alpine's 291MB, and carrying two variants of
+    # one major is the drift this pin exists to remove.
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres

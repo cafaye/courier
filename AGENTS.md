@@ -94,7 +94,7 @@ bin/gate-self-test                    proves gate.yml is able to fail
 bin/toolchain-pins                    reads mise.toml, checks CI has not drifted
 .github/workflows/ci.yml              calls kit's workflow, plus gate and release
 Dockerfile                            two-stage release build, slim final stage
-docker-compose.yml                    postgres:17 plus the release image
+docker-compose.yml                    postgres:17-alpine plus the release image
 rel/overlays/bin/server               the release entrypoint the image runs
 rel/overlays/bin/migrate              the release's migration entrypoint
 ```
@@ -261,7 +261,7 @@ plus one this packet added:
 ## Toolchain
 
 mise, from `mise.toml`: `mise install`, then `mise run prime` for the gate.
-For container work: `docker compose up --build` starts postgres:17 and the
+For container work: `docker compose up --build` starts postgres:17-alpine and the
 release image, and `docker compose down -v` throws the volume away.
 
 ## Generated rules

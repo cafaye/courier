@@ -29,7 +29,7 @@ half and adds the two jobs kit cannot own:
 | Job       | What it is                                                                                                    | Why it is not in kit's workflow                                                                   |
 | --------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `ci`      | `uses: cafaye/kit/.github/workflows/ci.reusable.yml@master`, `language: elixir`, toolchain pinned from `mise.toml` | — that is kit's job, and it is the only copy                                                                 |
-| `gate`    | `bin/prime` against a `postgres:17` service, each test tier named and counted, a `git diff --exit-code` guard on `mix.lock`, and a coverage floor | A caller cannot pass `services:` to a reusable workflow, and the floors are courier's numbers |
+| `gate`    | `bin/prime` against a `postgres:17-alpine` service, each test tier named and counted, a `git diff --exit-code` guard on `mix.lock`, and a coverage floor | A caller cannot pass `services:` to a reusable workflow, and the floors are courier's numbers |
 | `release` | `mix release` on the pinned toolchain, and the boot contract for `COURIER_SECRET_BOX_KEY`                          | kit builds no image, and only courier knows its release needs a key it must refuse to default        |
 
 Two things a reader should know before trusting a green run:
@@ -73,7 +73,7 @@ that exclusion.
 
 ```sh
 mix phx.server                      # http://localhost:4000, dev config
-docker compose up --build           # postgres:17 + the release image
+docker compose up --build           # postgres:17-alpine + the release image
 curl localhost:4000/healthz
 docker compose down -v              # stop and discard the volume
 ```
@@ -98,7 +98,7 @@ bin/prime                                       the gate: deps, database, tests
 bin/assert-suite                                refuses a run that skipped the hard part
 bin/toolchain-pins                              the one toolchain pin, read from mise.toml
 Dockerfile                                      two-stage release build, slim final
-docker-compose.yml                              postgres:17 + the release image
+docker-compose.yml                              postgres:17-alpine + the release image
 cafaye.yml                                      the manifest (draft, see below)
 ```
 
