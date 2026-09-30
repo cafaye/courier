@@ -1,0 +1,436 @@
+# courier's HTTP surface, per cafaye/core/docs/openapi-conventions.md.
+#
+# What is here and what is not is deliberate. `/v1/webhook_endpoints` is
+# documented because it is the first surface courier ships with a contract a
+# customer codes against. `GET` and `PUT /v1/notification_preferences/:user_id`
+# exist in the router and are covered by tests, and are *not* here — a document
+# that claims to describe courier and omits half of it is worse than one that
+# says what it covers. They are the next thing this file grows.
+#
+# `/healthz` and `/readyz` are not spec'd: they are infrastructure probes that run
+# before auth, routing and the rest of the platform exist, and no customer codes
+# against them.
+openapi: 3.1.0
+
+info:
+  # The document's own semantic version, which moves with the document and not
+  # with the `/v1` prefix. The prefix changes only on a breaking change, and then
+  # this number changes in the same commit.
+  version: 1.1.0
+  title: caFaye courier
+  description: |
+    Transactional email, notification preferences, and outbound webhooks.
+
+    courier delivers events to customer HTTP endpoints using the
+    [Standard Webhooks](https://www.standardwebhooks.com) signature scheme, so a
+    delivery is verified with an official library and nothing has to be written
+    about courier's scheme.
+  contact:
+    name: courier
+    email: courier@cafaye.com
+  license:
+    name: AGPL-3.0
+    identifier: AGPL-3.0-only
+
+servers:
+  - url: https://courier.cafaye.com
+    description: production
+  - url: http://localhost:4000
+    description: local
+
+tags:
+  - name: webhook endpoints
+    description: |
+      Where an account registers the URLs courier delivers events to, and the
+      signing secrets those deliveries are signed with.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/webhook_endpoints:
+    get:
+      tags: [webhook endpoints]
+      operationId: listWebhookEndpoints
+      summary: List the caller's webhook endpoints
+      description: |
+        Cursor-paginated, oldest first. Disabled endpoints are included:
+        disabling is not deleting, and the row carries the failure count and the
+        reason delivery stopped.
+      security:
+        - bearerAuth: [webhooks:read]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of endpoints
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointPage'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+    post:
+      tags: [webhook endpoints]
+      operationId: createWebhookEndpoint
+      summary: Register a webhook endpoint
+      description: |
+        The signing secret is returned **once**, in this response, and cannot be
+        retrieved afterwards. Store it before leaving the response. A url courier
+        will not send to is refused with a 422 whose `errors[0].code` names the
+        class — `blocked_scheme`, `blocked_host`, `blocked_address`,
+        `dns_failure` — because a well-formed url that resolves to a private
+        address is a different problem from a typo and the customer needs to be
+        told which one they have.
+      security:
+        - bearerAuth: [webhooks:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  maxLength: 2048
+                  description: |
+                    An absolute http(s) URL. `file:`, `ftp:`, `gopher:`, `data:`
+                    and `javascript:` are refused, as are loopback, link-local
+                    (including `169.254.169.254`), RFC1918 and unique-local
+                    addresses — by literal address *and* by what the host
+                    resolves to.
+                  examples:
+                    - https://hooks.example.com/cafaye
+                description:
+                  type: string
+                  maxLength: 500
+                  nullable: true
+      responses:
+        '201':
+          description: Registered, with the signing secret
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    allOf:
+                      - $ref: '#/components/schemas/WebhookEndpoint'
+                      - type: object
+                        required: [secret]
+                        properties:
+                          secret:
+                            type: string
+                            pattern: '^whsec_[A-Za-z0-9+/]+=*$'
+                            description: |
+                              The Standard Webhooks signing secret, base64
+                              encoded behind the `whsec_` prefix. Shown once.
+                            examples: ['whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw']
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /v1/webhook_endpoints/{id}:
+    parameters:
+      - $ref: '#/components/parameters/EndpointId'
+
+    get:
+      tags: [webhook endpoints]
+      operationId: getWebhookEndpoint
+      summary: Fetch one webhook endpoint
+      security:
+        - bearerAuth: [webhooks:read]
+      responses:
+        '200':
+          description: The endpoint
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+    patch:
+      tags: [webhook endpoints]
+      operationId: updateWebhookEndpoint
+      summary: Change a webhook endpoint
+      description: |
+        A new `url` is a new destination and passes the same checks as a create.
+        Fields that are not named are left alone, and the signing secret never
+        changes here: a customer who edits a description must not have every
+        delivery start failing verification for a day.
+      security:
+        - bearerAuth: [webhooks:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  maxLength: 2048
+                description:
+                  type: string
+                  maxLength: 500
+                  nullable: true
+                status:
+                  $ref: '#/components/schemas/WebhookEndpointStatus'
+      responses:
+        '200':
+          description: The endpoint as it now is
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+    delete:
+      tags: [webhook endpoints]
+      operationId: deleteWebhookEndpoint
+      summary: Remove a webhook endpoint
+      security:
+        - bearerAuth: [webhooks:write]
+      responses:
+        '204':
+          description: Removed. No body.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/webhook_endpoints/{id}/test:
+    parameters:
+      - $ref: '#/components/parameters/EndpointId'
+
+    post:
+      tags: [webhook endpoints]
+      operationId: testWebhookEndpoint
+      summary: Send a signed test payload to the endpoint
+      description: |
+        Sends a signed `ping` and reports what the receiver answered. The response
+        is `200` whether or not the endpoint accepted it: the caller's request
+        was well-formed and courier did what it was asked, which is a different
+        fact from courier being unable to test. Read `data.delivered`.
+
+        This is not a delivery. It writes no `webhook_deliveries` row, counts no
+        attempt, and does not move the endpoint's circuit breaker — a customer
+        testing their own endpoint and getting a 500 has learned something true,
+        and charging their circuit for asking would punish them for using the
+        diagnostic.
+      security:
+        - bearerAuth: [webhooks:write]
+      responses:
+        '200':
+          description: The ping was sent; `delivered` says whether it was accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [delivered, status_code, duration_ms]
+                    properties:
+                      delivered:
+                        type: boolean
+                        description: Whether the receiver answered 2xx.
+                      status_code:
+                        type: integer
+                        nullable: true
+                        description: The receiver's status, or null if nothing answered.
+                      duration_ms:
+                        type: integer
+                        description: How long the attempt took.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        identity is the only issuer. The token carries `account_id` for tenancy
+        and `scopes` for capability; courier checks both and never reads a role
+        out of a claim, because core's conventions say a service asks identity
+        about roles and checks scopes itself.
+
+  parameters:
+    EndpointId:
+      name: id
+      in: path
+      required: true
+      description: The endpoint's uuid.
+      schema: { type: string, format: uuid }
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Defaults to 25, capped at 100.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        The opaque cursor from a previous page's `page.next_cursor`. Clients must
+        not parse it; courier's encoding may change without notice. A cursor
+        courier did not issue is a 422.
+      schema: { type: string }
+
+  schemas:
+    WebhookEndpointStatus:
+      type: string
+      enum: [enabled, disabled]
+      description: |
+        `disabled` is two things wearing one column: the customer turned it off,
+        or courier's circuit breaker tripped. `disabled_reason` tells them apart,
+        and is courier's to clear.
+
+    WebhookEndpoint:
+      type: object
+      required: [id, account_id, url, status, consecutive_failures]
+      properties:
+        id: { type: string, format: uuid }
+        account_id:
+          type: string
+          format: uuid
+          description: The owning account. Always the caller's.
+        url: { type: string, format: uri, maxLength: 2048 }
+        description: { type: string, nullable: true, maxLength: 500 }
+        status: { $ref: '#/components/schemas/WebhookEndpointStatus' }
+        consecutive_failures:
+          type: integer
+          description: |
+            Failures since the last success. At the circuit threshold courier
+            disables the endpoint and records why.
+        disabled_reason:
+          type: string
+          nullable: true
+          description: |
+            Why delivery stopped, when courier is the one who stopped it. Null for
+            an endpoint the customer disabled, and null again once they re-enable
+            one courier had tripped.
+
+    WebhookEndpointPage:
+      type: object
+      required: [data, page]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEndpoint' }
+        page:
+          type: object
+          required: [has_more, next_cursor]
+          properties:
+            has_more: { type: boolean }
+            next_cursor:
+              type: string
+              nullable: true
+              description: Null on the last page.
+
+    Problem:
+      type: object
+      description: RFC 9457, with courier's extensions. Every non-2xx.
+      required: [type, title, status, detail, code, trace_id]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: '`https://errors.cafaye.com/<code>`. The machine-readable contract.'
+        title: { type: string }
+        status: { type: integer }
+        detail:
+          type: string
+          description: Specific to this occurrence. Not parsed by clients.
+        instance:
+          type: string
+          nullable: true
+          description: The path the request was made to.
+        code:
+          type: string
+          description: The last segment of `type`, in snake_case.
+        trace_id:
+          type: string
+          description: Matches the `X-Trace-Id` response header. Support starts here.
+        errors:
+          type: array
+          description: Present only on a 422.
+          items:
+            type: object
+            required: [field, code]
+            properties:
+              field:
+                type: string
+                description: The path in the *request*, which is what the caller can fix.
+              code:
+                type: string
+                enum: [invalid_format, taken, blocked_scheme, blocked_host, blocked_address, dns_failure]
+
+  responses:
+    Unauthorized:
+      description: |
+        No authenticated caller. courier does not guess an account for an
+        anonymous request.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/unauthorized
+            title: Unauthorized
+            status: 401
+            detail: This request needs an authenticated caller.
+            code: unauthorized
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    NotFound:
+      description: |
+        No such endpoint, for this account. An endpoint belonging to another
+        account is also a 404: core's conventions forbid a 403 here, because it
+        leaks the existence of a resource the caller cannot see.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/not_found
+            title: Not found
+            status: 404
+            detail: No webhook endpoint with that id.
+            code: not_found
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    ValidationFailed:
+      description: |
+        The request was well-formed and the thing it asked for is not allowed.
+        `errors[].code` distinguishes a typo from a refused destination.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/validation_failed
+            title: Validation failed
+            status: 422
+            detail: That url is one courier will not send webhooks to.
+            code: validation_failed
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+            errors:
+              - field: url
+                code: blocked_address

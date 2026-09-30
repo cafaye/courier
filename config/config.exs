@@ -41,13 +41,51 @@ config :swoosh, api_client: false
 # nothing else is scheduled yet.
 config :courier, Oban,
   repo: Courier.Repo,
-  queues: [outbox: 10]
+  queues: [outbox: 10, webhooks: 5]
 
 # Outbox relay tuning. Read at runtime, not compiled in, so a deployment can
 # change batch size without a rebuild.
 config :courier, :outbox,
   batch_size: 50,
   max_attempts: 10
+
+# Outbound webhooks. Everything here is read at runtime, not compiled in, because
+# all of it is a decision an operator has to be able to see and change without a
+# rebuild — and PLAN.md §7 requires the budget to be bounded, which is only true
+# if the bound is a number somebody can point at.
+config :courier, :webhooks,
+  # Eight attempts, five minutes apart at first, doubling, capped at six hours,
+  # plus up to 25% jitter. A full budget spans roughly sixteen hours: the spec's
+  # §Deliverability asks for "a retry schedule spanning multiple days", and this
+  # is the same shape at a scale one courier-sized service can defend, without
+  # keeping a dead endpoint's deliveries alive for a week.
+  max_attempts: 8,
+  backoff_base_seconds: 300,
+  backoff_cap_seconds: 21_600,
+  jitter_divisor: 4,
+  # Consecutive failures before the circuit opens and the endpoint is disabled
+  # with a reason. The spec §Deliverability says a consumer failing "consistently
+  # over a long period of time" should have future delivery disabled; five is
+  # courier's answer to "consistently", with the retry budget above deciding how
+  # long that takes per delivery.
+  circuit_threshold: 5,
+  # The attempt timeout. Spec §Request timeouts asks for 15–30s; the low end,
+  # because a delivery holding a worker is a delivery nobody else gets.
+  timeout_ms: 15_000,
+  connect_timeout_ms: 5_000,
+  # How many outbox events one dispatch run fans out. Bounded so a large backlog
+  # is worked through in batches rather than in one transaction that holds row
+  # locks across the whole table.
+  dispatch_batch_size: 100,
+  # How many due deliveries one send run attempts. Bounded for the same reason,
+  # and smaller than the dispatch batch because each of these makes a network call
+  # and a hundred concurrent requests to a hundred different customers is a burst
+  # courier's own egress gets shaped for.
+  delivery_batch_size: 25
+
+# The resolver the SSRF guard checks addresses with. Overridden in test so a URL
+# check never depends on what a real resolver says about a real name.
+config :courier, :dns_resolver, Courier.Webhooks.Dns.System
 
 # Configure the endpoint
 config :courier, CourierWeb.Endpoint,

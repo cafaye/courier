@@ -50,6 +50,26 @@ if config_env() == :prod do
   # exercises the whole pipeline without mailing anyone; the provider packet
   # replaces this line with the provider adapter and its credentials.
   config :courier, Courier.Mailer, adapter: Swoosh.Adapters.Local
+
+  # The key every webhook signing secret is sealed under (`Courier.SecretBox`).
+  # It is required rather than defaulted, because a default would be a key in
+  # version control and every deployment that forgot to set one would seal its
+  # customers' credentials under it. 32 bytes, base64:
+  #
+  #     openssl rand -base64 32
+  #
+  # Rotating it means every stored secret has to be re-sealed under the new key,
+  # which is why it is a deployment concern and not a courier feature: see
+  # `Courier.SecretBox` for the consequences of losing it.
+  config :courier,
+         :secret_box_key,
+         System.get_env("COURIER_SECRET_BOX_KEY") ||
+           raise("""
+           environment variable COURIER_SECRET_BOX_KEY is missing.
+
+           It is the 32-byte key every webhook signing secret is sealed under.
+           Generate one with: openssl rand -base64 32
+           """)
 end
 
 if config_env() == :prod do

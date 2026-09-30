@@ -35,6 +35,73 @@ defmodule CourierWeb.RouterTest do
     end
   end
 
+  describe "the webhook endpoints surface" do
+    alias CourierWeb.WebhookEndpointsController
+
+    @routes [
+      {"GET", "/v1/webhook_endpoints", :index},
+      {"POST", "/v1/webhook_endpoints", :create},
+      {"GET", "/v1/webhook_endpoints/8f3c2b1a-0000-4000-8000-000000000001", :show},
+      {"PATCH", "/v1/webhook_endpoints/8f3c2b1a-0000-4000-8000-000000000001", :update},
+      {"DELETE", "/v1/webhook_endpoints/8f3c2b1a-0000-4000-8000-000000000001", :delete},
+      {"POST", "/v1/webhook_endpoints/8f3c2b1a-0000-4000-8000-000000000001/test", :ping}
+    ]
+
+    test "every action resolves to CourierWeb.WebhookEndpointsController" do
+      for {method, path, action} <- @routes do
+        assert %{plug: WebhookEndpointsController, plug_opts: ^action} =
+                 Phoenix.Router.route_info(Router, method, path, "")
+      end
+    end
+
+    test "every action is behind the authenticated pipeline" do
+      # Not one of them: a single action outside the pipeline is an endpoint that
+      # serves whoever asks, and the controller's own matrix would not catch it,
+      # because that matrix goes through the same router.
+      for {method, path, _action} <- @routes do
+        assert %{pipe_through: pipelines} = Phoenix.Router.route_info(Router, method, path, "")
+
+        assert :authenticated in pipelines, "#{method} #{path} must be behind authentication"
+      end
+    end
+
+    test "notification preferences are NOT behind it, because that gap is recorded elsewhere" do
+      # Their controller's moduledoc says its requests are unauthenticated in this
+      # packet. Moving them is not this packet's business, and quietly putting them
+      # behind a plug would change an API without saying so.
+      assert %{pipe_through: [:api]} =
+               Phoenix.Router.route_info(Router, "GET", "/v1/notification_preferences/abc", "")
+    end
+
+    test "no action answers a method it does not declare" do
+      # `POST /v1/webhook_endpoints` is create and nothing else. A `PUT` on the
+      # same path would be a second way to do the same thing with different
+      # semantics, which is what core's conventions are there to prevent.
+      assert served_on("/v1/webhook_endpoints") == ["GET", "POST"]
+      assert served_on("/v1/webhook_endpoints/:id") == ["DELETE", "GET", "PATCH"]
+      assert served_on("/v1/webhook_endpoints/:id/test") == ["POST"]
+    end
+
+    test "the path is the plural noun core's conventions ask for, under /v1" do
+      # core/docs/openapi-conventions.md: "Path under `/v1`, no trailing slash,
+      # plural nouns, kebab-case for multi-word."
+      for {_method, path, _action} <- @routes do
+        assert String.starts_with?(path, "/v1/webhook_endpoint")
+        refute String.ends_with?(path, "/")
+      end
+    end
+  end
+
+  # Which methods the router answers for a route pattern, discovered rather than
+  # declared, so a route serving more than it documents shows up here. The pattern
+  # has to be the router's own — `route_info/4` matches the route as written, not
+  # a path that would reach it.
+  defp served_on(route) do
+    ~w(GET POST PUT PATCH DELETE)
+    |> Enum.filter(&match?(%{route: ^route}, Phoenix.Router.route_info(Router, &1, route, "")))
+    |> Enum.sort()
+  end
+
   describe "in the production environment" do
     setup do
       # config/prod.exs is compile-time configuration, so it is not in the test

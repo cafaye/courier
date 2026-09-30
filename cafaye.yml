@@ -10,10 +10,11 @@
 # UNRESOLVED, and deliberately not guessed here:
 #   - `core: ^0.1.0` assumes core's first release is 0.1.0. If it lands as 0.2.0
 #     this line is wrong and CI's pin will not resolve.
-#   - `exposes.api` has no document to point at yet. `/healthz` and `/readyz` are
-#     infrastructure probes, not API surface, so they are not spec'd. courier
-#     gains its first real endpoint (transactional email, Phase 3) and this is
-#     where the OpenAPI document goes.
+#   - `exposes.api` now points at `openapi.yaml` (courier-03), which documents
+#     `/v1/webhook_endpoints`. The notification preferences routes are in the
+#     router and in the tests but NOT yet in that document, so the document is
+#     incomplete rather than wrong; a route that exists and is undocumented will
+#     be caught by the contract lint when it enforces that direction.
 #   - `consumes` is empty. courier is not subscribed to anything yet; when it
 #     starts reacting to identity or billing events this is the list, and every
 #     entry has to come with an idempotent consumer, because delivery is
@@ -39,12 +40,22 @@ core: ^0.1.0
 # catalog entry is a promise, not a claim. `email.bounced` and `email.complained`
 # need a provider webhook, which is a later packet.
 exposes:
+  # courier's first documented HTTP surface. Written to core's
+  # `docs/openapi-conventions.md`: `/v1` prefix, `info.version` present, problem+json
+  # for every non-2xx, cursor pagination, and the auth stated per operation.
+  api: openapi.yaml
+
+  # Three segments, always: `<service>.<entity>.<action>` (core/docs/event-naming.md
+  # §courier, and core's frozen `eventType` grammar). courier-01/02 shipped
+  # `email.delivered` and four siblings, which `caf contract lint` rejects; core
+  # records the same drift in its own docs. The spellings below are the conforming
+  # ones, and they are the names courier's `Courier.Events` catalog now uses too.
   events:
-    - email.queued
-    - email.delivered
-    - email.bounced
-    - email.complained
-    - notification.suppressed
+    - courier.email.queued
+    - courier.email.delivered
+    - courier.email.bounced
+    - courier.email.complained
+    - courier.notification.suppressed
 
 consumes: []
 

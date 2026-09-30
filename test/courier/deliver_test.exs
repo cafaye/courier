@@ -71,7 +71,7 @@ defmodule Courier.DeliverTest do
       assert {:ok, _result} = Deliver.welcome(payload())
 
       assert [event] = outbox()
-      assert event.type == "email.delivered"
+      assert event.type == "courier.email.delivered"
       assert event.source == "courier"
       assert event.published_at == nil
       assert event.attempt_count == 0
@@ -165,7 +165,7 @@ defmodule Courier.DeliverTest do
                Deliver.password_reset(payload(%{url: "https://cafaye.com/reset?t=1"}))
 
       assert_email_sent(subject: "Reset your caFaye password")
-      assert [%{type: "email.delivered"}] = outbox()
+      assert [%{type: "courier.email.delivered"}] = outbox()
     end
 
     test "another user is unaffected" do

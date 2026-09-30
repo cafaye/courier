@@ -54,7 +54,7 @@ defmodule Courier.Workers.ProcessOutboxWorkerTest do
       assert {:ok, _result} = perform_job(ProcessOutboxWorker, %{})
 
       assert_received {:nats_published, published}
-      assert published["type"] == "email.delivered"
+      assert published["type"] == "courier.email.delivered"
       assert published["id"] == row.id
     end
 

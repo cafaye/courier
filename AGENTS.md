@@ -31,13 +31,31 @@ lib/courier/notification_preference.ex         the row behind a user's answer
 lib/courier/notification_preferences.ex       read and write those answers
 lib/courier/nats_publisher.ex         the behaviour the relay publishes through
 lib/courier/nats_publisher/noop.ex    the stand-in that hands envelopes back
+lib/courier/principal.ex              the caller, the resolver behaviour, and the
+                                      default resolver that authenticates nobody
+lib/courier/secret_box.ex             sealing: a signing secret at rest, AES-GCM
+lib/courier/webhook_endpoint.ex       the row, its changesets, its status enum
+lib/courier/webhook_endpoints.ex      the context: register, change, remove, trip
+lib/courier/webhook_delivery.ex       one delivery, and its retry state
+lib/courier/webhook_deliveries.ex     the retry budget's arithmetic
+lib/courier/webhooks/signature.ex     the Standard Webhooks signature, exactly
+lib/courier/webhooks/verifier.ex      the consumer's half: tolerance, HMAC check
+lib/courier/webhooks/url_guard.ex     the SSRF guard: resolve, check, return target
+lib/courier/webhooks/dns.ex           the resolver seam, and its :inet impl
+lib/courier/webhooks/payload.ex       the bytes signed, and the ping body
+lib/courier/webhooks/sender.ex        the delivery behaviour and its policy
+lib/courier/webhooks/sender/req.ex    the Req implementation that ships
 lib/courier/workers/process_outbox_worker.ex  the relay itself
+lib/courier/workers/dispatch_webhooks_worker.ex  outbox event -> delivery rows
+lib/courier/workers/deliver_webhook_worker.ex    due delivery -> signed POST
 lib/courier_web/problem.ex            core's problem+json envelope, built once
 lib/courier_web/plugs/trace.ex        a trace id and the path, for every request
 lib/courier_web/plugs/parse_body.ex   Plug.Parsers, with courier's 400
+lib/courier_web/plugs/principal.ex    who is calling; 401 when nobody is
 lib/courier_web/plugs/problem_content_type.ex  a non-2xx is problem+json
 lib/courier_web/controllers/health_controller.ex   GET /healthz, GET /readyz
 lib/courier_web/controllers/notification_preferences_controller.ex  GET/PUT /v1
+lib/courier_web/controllers/webhook_endpoints_controller.ex  the six /v1 actions
 lib/courier_web/controllers/error_json.ex        the errors Phoenix renders
 lib/courier_web/router.ex             probes at the root, /v1 for the API
 test/courier/health_test.exs          the readiness check, on its own
@@ -48,11 +66,20 @@ test/courier/deliver_adapter_test.exs what happens when the provider says no
 test/courier/notification_preferences_test.exs  defaults, writes, rejections
 test/courier/events_test.exs          the envelope against core's schema
 test/courier/nats_publisher_test.exs  the behaviour and the stand-in
-test/courier/workers/                 the relay: claim, mark, backoff, failure
-test/courier_web/controllers/health_controller_test.exs   probes, including DB-down
-test/courier_web/controllers/notification_preferences_controller_test.exs  the API
-test/courier_web/controllers/error_json_test.exs        the error envelope
+test/courier/secret_box_test.exs      a secret is not readable from its column
+test/courier/webhook_endpoints_test.exs        the rows and their promises
+test/courier/webhook_endpoints_config_test.exs the guard, with a chosen resolver
+test/courier/webhook_deliveries_test.exs       the budget, the backoff, the id
+test/courier/webhooks/signature_test.exs       the spec's scheme, verified twice
+test/courier/webhooks/url_guard_test.exs       every blocked address class
+test/courier/webhooks/payload_test.exs         the bytes on the wire
+test/courier/webhooks/sender_test.exs          the request and its classification
+test/courier/workers/                 the relay, the fan-out, and the sender
+test/courier_web/controllers/          the API, and the authorization matrix
 test/courier_web/router_test.exs      which controller, which scope, which methods
+test/support/recording_sender.ex      a sender that records instead of sending
+test/support/header_resolver.ex       a principal that reads a header
+test/support/test_dns.ex              a resolver that answers from a table
 bin/prime                             the gate: deps, database, tests
 Dockerfile                            two-stage release build, slim final stage
 docker-compose.yml                    postgres:17 plus the release image
@@ -90,8 +117,70 @@ drops unused deps from the lockfile, formats, and runs the suite. `bin/prime`
 is the gate for a clean checkout; `mix precommit` is what a change must pass.
 
 **`async: false` is a comment, not a shrug.** If your test stops or restarts a
-process the suite shares — `Courier.Repo`, the endpoint — it must be
-`async: false` and say why in a comment above `use`.
+process the suite shares — `Courier.Repo`, the endpoint, the Oban queue — it must
+be `async: false` and say why in a comment above `use`. The same goes for a test
+that changes application env, which the whole VM shares: those live in their own
+`*ConfigTest` file, as `ProcessOutboxWorkerConfigTest`,
+`WebhookEndpointsConfigTest` and `DeliverWebhookWorkerBudgetTest` do.
+
+**A webhook signature is not courier's to invent.** PLAN.md §7 adopted [Standard
+Webhooks](https://www.standardwebhooks.com) and said "No custom scheme", which
+means the base string is `msg_id.timestamp.payload`, the headers are
+`webhook-id` / `webhook-timestamp` / `webhook-signature`, and a consumer can
+verify a delivery with an official library without learning anything about
+courier. `moon/refs/standard-webhooks/spec/standard-webhooks.md` is the authority;
+cite the section in the moduledoc when you touch any of it. Renaming a header or
+"improving" the base string breaks every customer integration at once, and the
+only way to find out is from them.
+
+**The signed bytes are the sent bytes.** The spec is explicit that re-serializing
+a payload between signing and sending invalidates the signature. Encode once,
+sign that binary, send that binary.
+
+**Every URL a customer gives courier passes `Courier.Webhooks.UrlGuard` before
+it is stored, and the address the sender dials is the one the guard checked.**
+courier will HMAC a request to an attacker-chosen URL, so this is the difference
+between a webhook sender and an SSRF proxy. The guard resolves the host, refuses
+the URL if *any* answer is a blocked address, and returns the resolved address —
+not the name — so there is no second, unchecked lookup. If you add a way to set an
+endpoint's URL anywhere else, run the guard there too; a table full of
+`169.254.169.254` for whatever reads it first is the failure mode.
+
+**A signing secret is never in the database in the clear.** `Courier.SecretBox`
+seals it with AES-256-GCM under `COURIER_SECRET_BOX_KEY`, and the plaintext exists
+in exactly two places: the single `201` that hands it to the customer, and the
+process signing with it. The tests read the column as raw SQL for that reason.
+A hash is not an option here — courier has to sign *with* the bytes.
+
+**A retry budget is bounded and visible, and there are two of them.**
+`config :courier, :webhooks` holds `max_attempts` (per delivery) and
+`circuit_threshold` (per endpoint), plus the backoff base, cap and jitter
+divisor. PLAN.md §7 forbids naive retries, which means the numbers live in
+configuration an operator can read, not in a constant inside a worker.
+
+**Nothing sleeps.** The backoff schedule is asserted on the recorded
+`next_attempt_at` and on `backoff/1`'s return value. A test that waits for a
+five-minute window is a test that takes five minutes, and one that lowers the
+window to make it fast is a test that stopped checking the schedule.
+
+**An authorization decision is a 404, not a 403, for anything the caller cannot
+see.** Core's `docs/openapi-conventions.md` says 403 "leaks existence". The
+account comes from `conn.assigns.current_account`, never from a request body —
+`CourierWeb.Plugs.Principal` is a seam with a refusing default, so a courier
+without identity's JWT verifier is locked rather than open.
+
+## Environment
+
+`DATABASE_URL`, `SECRET_KEY_BASE` and `PHX_HOST`, as any Phoenix release needs,
+plus one this packet added:
+
+- **`COURIER_SECRET_BOX_KEY`** — 32 bytes, base64, the key every webhook signing
+  secret is sealed under (`openssl rand -base64 32`). Required in prod and
+  never defaulted: a default would be a key in version control that every
+  deployment which forgot to set one would seal its customers' credentials
+  under. `config/test.exs` sets a fixed one; losing the production key means
+  every stored secret has to be re-issued, because the plaintext cannot be
+  recovered from the ciphertext.
 
 ## Toolchain
 
