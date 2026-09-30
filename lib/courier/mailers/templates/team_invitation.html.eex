@@ -1,0 +1,4 @@
+<p><%= @greeting %></p>
+<p><%= @invited_by %> invited you to join <%= @account_name %> as <%= @role %>.</p>
+<p><a href="<%= @url %>">Accept the invitation</a></p>
+<p>If you were not expecting this, ignore this message and nothing has changed.</p>

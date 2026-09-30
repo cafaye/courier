@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>caFaye</title>
+  </head>
+  <body>
+    <div class="wrapper"><%= @body %></div>
+    <p class="footer">You are receiving this message from caFaye.</p>
+  </body>
+</html>

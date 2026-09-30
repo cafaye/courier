@@ -21,10 +21,37 @@ PLAN.md §2 forbids copying from it.
 ```
 lib/courier/health.ex                 readiness check: does the database answer
 lib/courier/release.ex                migrations from inside a release, no Mix
+lib/courier/mailer.ex                 the Swoosh mailer: the adapter is config
+lib/courier/mailers.ex                compose the three transactional emails
+lib/courier/mailers/templates/        the bodies, compiled at build time
+lib/courier/deliver.ex                the send: preference, provider, outbox row
+lib/courier/events.ex                 the CloudEvents envelope and the catalog
+lib/courier/outbox_event.ex           one emission, and the envelope it publishes
+lib/courier/notification_preference.ex         the row behind a user's answer
+lib/courier/notification_preferences.ex       read and write those answers
+lib/courier/nats_publisher.ex         the behaviour the relay publishes through
+lib/courier/nats_publisher/noop.ex    the stand-in that hands envelopes back
+lib/courier/workers/process_outbox_worker.ex  the relay itself
+lib/courier_web/problem.ex            core's problem+json envelope, built once
+lib/courier_web/plugs/trace.ex        a trace id and the path, for every request
+lib/courier_web/plugs/parse_body.ex   Plug.Parsers, with courier's 400
+lib/courier_web/plugs/problem_content_type.ex  a non-2xx is problem+json
 lib/courier_web/controllers/health_controller.ex   GET /healthz, GET /readyz
-lib/courier_web/router.ex             probes at the root, /api reserved
+lib/courier_web/controllers/notification_preferences_controller.ex  GET/PUT /v1
+lib/courier_web/controllers/error_json.ex        the errors Phoenix renders
+lib/courier_web/router.ex             probes at the root, /v1 for the API
 test/courier/health_test.exs          the readiness check, on its own
+test/courier/mailers_test.exs         what the platform hands in, per message
+test/courier/mailers_config_test.exs  the sender and the subject are config
+test/courier/deliver_test.exs         the three promises, in one transaction
+test/courier/deliver_adapter_test.exs what happens when the provider says no
+test/courier/notification_preferences_test.exs  defaults, writes, rejections
+test/courier/events_test.exs          the envelope against core's schema
+test/courier/nats_publisher_test.exs  the behaviour and the stand-in
+test/courier/workers/                 the relay: claim, mark, backoff, failure
 test/courier_web/controllers/health_controller_test.exs   probes, including DB-down
+test/courier_web/controllers/notification_preferences_controller_test.exs  the API
+test/courier_web/controllers/error_json_test.exs        the error envelope
 test/courier_web/router_test.exs      which controller, which scope, which methods
 bin/prime                             the gate: deps, database, tests
 Dockerfile                            two-stage release build, slim final stage

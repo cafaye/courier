@@ -27,6 +27,13 @@ defmodule CourierWeb.Endpoint do
     only: CourierWeb.static_paths(),
     raise_on_missing_only: code_reloading?
 
+  # Trace first, before anything that can raise: Plug.Static raises in dev,
+  # Plug.Parsers raises on a body it cannot read, and the router raises
+  # NoRouteError on a path courier does not serve. All three are rendered by
+  # CourierWeb.ErrorJSON out of the assigns this plug leaves behind, and all
+  # three are answered from the same trace id.
+  plug CourierWeb.Plugs.Trace
+
   # Code reloading can be explicitly enabled under the
   # :code_reloader configuration of your endpoint.
   if code_reloading? do
@@ -37,7 +44,9 @@ defmodule CourierWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
-  plug Plug.Parsers,
+  # Plug.Parsers, with courier's answer for a body it cannot parse — see
+  # CourierWeb.Plugs.ParseBody for why that is a module of its own.
+  plug CourierWeb.Plugs.ParseBody,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
     json_decoder: Phoenix.json_library()
@@ -45,5 +54,6 @@ defmodule CourierWeb.Endpoint do
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options
+  plug CourierWeb.Plugs.ProblemContentType
   plug CourierWeb.Router
 end

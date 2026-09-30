@@ -1,21 +1,37 @@
 defmodule CourierWeb.ErrorJSON do
   @moduledoc """
-  This module is invoked by your endpoint in case of errors on JSON requests.
+  Every non-2xx response courier sends, in the one shape core requires
+  (`core/docs/openapi-conventions.md`).
 
-  See config/config.exs.
+  This module is what Phoenix calls for a request that failed before a
+  controller could answer it — an unknown route, a 500 — and it is why those
+  responses are the same envelope as the ones a controller sends deliberately.
+  `CourierWeb.Problem` builds the envelope; this decides which code a status
+  means.
+
+  The assigns are the request's (`CourierWeb.Plugs.Trace` put the trace id and the
+  path there before the router ran), so a 404 for a path courier does not serve
+  still carries the same id as its `X-Trace-Id` header.
   """
 
-  # If you want to customize a particular status code,
-  # you may add your own clauses, such as:
-  #
-  # def render("500.json", _assigns) do
-  #   %{errors: %{detail: "Internal Server Error"}}
-  # end
+  alias CourierWeb.Problem
 
-  # By default, Phoenix returns the status message from
-  # the template name. For example, "404.json" becomes
-  # "Not Found".
-  def render(template, _assigns) do
-    %{errors: %{detail: Phoenix.Controller.status_message_from_template(template)}}
+  def render(template, assigns) do
+    status = status(template, assigns)
+    code = Problem.for_status(status)
+
+    Problem.build(assigns, status, code, detail(status, code))
   end
+
+  # `status` is in the assigns Phoenix renders with; the template name is the
+  # fallback for a caller that renders an error template directly.
+  defp status(_template, %{status: status}) when is_integer(status), do: status
+  defp status(template, _assigns), do: template |> Path.rootname() |> String.to_integer()
+
+  # Terse on purpose: these bodies are read by anyone who can reach the service,
+  # and a stack trace or an exception message is a map of courier's internals.
+  defp detail(404, :not_found), do: "There is no route for that request."
+  defp detail(400, :bad_request), do: "The request could not be understood."
+  defp detail(422, :validation_failed), do: "The request was not valid."
+  defp detail(_status, _code), do: "The request could not be completed."
 end
