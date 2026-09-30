@@ -18,10 +18,12 @@
 # requirement is the operator's to satisfy, before gating.
 #
 # MEASURED, NOT GUESSED. Every number and every pattern here came from running
-# this repository's gate and reading its output, on courier at master 59247b6:
+# this repository's gate and reading its output. The figures below are courier at
+# master 59247b6, except the suite count, which courier-12 re-measured on
+# `worker/courier-12-contract` after adding the error-response checks:
 #
 #   * the gate is `mise run prime`, which runs `./bin/prime`;
-#   * the suite prints exactly one `Result:` line, `Result: 535 passed`;
+#   * the suite prints exactly one `Result:` line, `Result: 564 passed`;
 #   * a warm gate takes ~37s; a cold one (deps + compile) is minutes;
 #   * `./bin/prime` on its own does NOT work without mise on PATH — line 14 is
 #     `mix local.hex --force` and it exits 127 with "mix: command not found".
@@ -80,21 +82,22 @@ gate:
       # that finding, which is the check working on the declaration that
       # declares the checks.
       match: '^Result: ([0-9]+) passed(?: \([^)]*\))?$'
-      # 535 is what the suite reports today, measured, not copied from core's
-      # 163 or from courier's own CI floor of 488. This is a DECREASE-DETECTOR:
-      # `minimum` is read from the LAST match, so a run that printed 535 and
-      # then 500 would be caught, and a suite that quietly lost 40 tests cannot
+      # 564 is what the suite reports today, measured, not copied from core's
+      # 163 or from courier's own CI floor. This is a DECREASE-DETECTOR:
+      # `minimum` is read from the LAST match, so a run that printed 564 and
+      # then 500 would be caught, and a suite that quietly lost 64 tests cannot
       # report itself as passing.
       #
-      # The margin below the measured 535 is deliberate and small. courier is a
+      # The margin below the measured 564 is deliberate and small. courier is a
       # growing repository and this floor is a ratchet that is meant to be
-      # raised as the suite grows, not a target the suite must hit. Note that
-      # CI's own `bin/assert-suite` floor is 488, which is BELOW today's 535 —
-      # that is a real, pre-existing gap in this repository and it is reported
-      # in REPORT-core-10-courier.md rather than papered over here. This file
-      # states the truth about the suite as it is; it does not lower CI's floor
-      # to agree with it, and nothing in this packet touches CI's behaviour.
-      minimum: 530
+      # raised as the suite grows, not a target the suite must hit.
+      #
+      # The previous value here was 530 against a measured 535, and CI's
+      # `bin/assert-suite` floor was 488 — a gap this file named rather than
+      # papered over in REPORT-core-10-courier.md. Both are now raised to match
+      # the suite: 564 here, 564 in CI. The `whole suite` and `no database` and
+      # `database` floors moved with them (252 and 312), measured the same way.
+      minimum: 560
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres

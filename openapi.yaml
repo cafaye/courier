@@ -27,14 +27,87 @@
 # > []` will send no token, so closing it later is a breaking change to the
 # > contract. Cost of flipping now: one scope name and the plug in a scope block.
 # > Cost of flipping later: a major `info.version` and every generated client.
+#
+# ## What courier does not return, and why that is written down here
+#
+# A document that omits a reachable response is worse than one that says what it
+# covers, so the omissions are declared rather than left to be found. Each of the
+# following was measured against this repository's endpoint rather than read off
+# it, and each is the reason no operation below declares it:
+#
+#   * **403 `forbidden`** — nothing sends it. `CourierWeb.Plugs.Principal`
+#     answers 401 for an anonymous caller and nothing else, and an endpoint in
+#     another account is a 404, because core forbids a 403 that leaks existence.
+#   * **409 `conflict` / `idempotency_key_reused`** — nothing sends them. A
+#     duplicate `url` is a **422** whose `errors[0].code` is `taken`, which is the
+#     status convention's "semantically wrong", not a conflict.
+#   * **415 `unsupported_media_type`** — the parser is configured
+#     `pass: ["*/*"]`, so an unknown content type is neither parsed nor refused.
+#     The request reaches the controller and is answered 422 for the field it did
+#     not carry.
+#   * **429 `rate_limited`** — there is no limiter. Thirty rapid reads answer
+#     thirty 200s and thirty rapid writes answer thirty 201s.
+#   * **503 `unavailable`** — only `GET /readyz` sends it, and that is an
+#     infrastructure probe rather than a customer operation.
+#
+# ## Idempotency-Key is not accepted, and this document does not pretend it is
+#
+# Core's conventions require `Idempotency-Key` on a mutating `POST` that can be
+# retried safely, and `createWebhookEndpoint` is exactly that: it registers a
+# destination that will receive at-least-once deliveries. **courier does not
+# implement it.** Measured: the same key sent three times with the same body
+# creates two rows and answers `201`, `422`, `422` — the 422s are the unique index
+# on `url`, not the key — the same key with a different body creates a further
+# row, and there is no `Idempotency-Replayed` response header. A non-uuid key and
+# a 5000-character key are both accepted without complaint.
+#
+# So no operation below declares the header, and none declares a 409 courier
+# cannot return. Declaring either would be a contract for behaviour that is not
+# there, and a client that generated a retry from it would be retrying against a
+# service that was never listening. It is named as a gap rather than papered
+# over — REPORT-courier-12-contract.md has the measurement.
+#
+# ## Two other facts about this surface, because a reader is owed them
+#
+#   * **`?order=` and `?offset=` are accepted and ignored.** Core's standard
+#     request shape is `?limit=&cursor=&order=asc|desc`; courier paginates
+#     oldest-first only, so a request carrying `order` is answered as if it were
+#     not there, and `offset` is ignored for the reason core gives for banning it.
+#     Neither is declared below, because neither is honoured.
+#   * **`limit` is capped silently.** `?limit=99999` is a 200 answering with at
+#     most 100 rows, not a 422. The cap is real and is stated in the parameter;
+#     what a client cannot see from here is that it was applied.
+#
+# ## Why `400` is on some operations and not others
+#
+# `CourierWeb.Plugs.ParseBody` wraps `Plug.Parsers`, and that reads a request body
+# for `POST`, `PUT`, `PATCH` and `DELETE` — and for no other verb. So the 400 is
+# reachable on exactly the four operations above that carry one of those verbs,
+# which is not the same as "every operation that takes input": `GET` sends no body
+# and is refused by neither the parser nor anything else, and a `400` declared on a
+# `GET` is a case a client writes and can never run.
+#
+# `DELETE` is the one that reads wrong. A `DELETE` carries no body in any sensible
+# client, so it looks bodyless, and a document that omits its 400 looks right —
+# until a client that does send one is answered with a body nobody documented. It
+# is declared for that reason, and
+# `test/courier_web/openapi_error_responses_test.exs` checks the agreement in both
+# directions so neither half can drift back.
 openapi: 3.1.0
 
 info:
   # The document's own semantic version, which moves with the document and not
   # with the `/v1` prefix. The prefix changes only on a breaking change, and then
-  # this number changes in the same commit. This is a minor bump: two operations
-  # were added, nothing that exists changed shape.
-  version: 1.2.0
+  # this number changes in the same commit.
+  #
+  # This is a minor bump and nothing more. No path changed, no operation was added
+  # or removed, and no request or response that already existed changed shape:
+  # courier-12 added the two error responses every operation could already return
+  # and described none of (`500` and `406`), and declared the `detail` courier
+  # already sends inside a 422's `errors[]`. Core's sync rule is that a
+  # non-breaking change bumps only `info.version`, and a client that already reads
+  # this file is not broken by learning that a 500 was possible.
+  version: 1.3.0
   title: caFaye courier
   description: |
     Transactional email, notification preferences, and outbound webhooks.
@@ -102,8 +175,9 @@ paths:
                 required: [data]
                 properties:
                   data: { $ref: '#/components/schemas/NotificationPreferences' }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
     put:
       tags: [notification preferences]
@@ -172,7 +246,9 @@ paths:
                 properties:
                   data: { $ref: '#/components/schemas/NotificationPreferences' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
   /v1/webhook_endpoints:
     get:
@@ -196,7 +272,9 @@ paths:
               schema:
                 $ref: '#/components/schemas/WebhookEndpointPage'
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
     post:
       tags: [webhook endpoints]
@@ -258,8 +336,11 @@ paths:
                               The Standard Webhooks signing secret, base64
                               encoded behind the `whsec_` prefix. Shown once.
                             examples: ['whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw']
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
   /v1/webhook_endpoints/{id}:
     parameters:
@@ -283,6 +364,8 @@ paths:
                   data: { $ref: '#/components/schemas/WebhookEndpoint' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '500': { $ref: '#/components/responses/Internal' }
 
     patch:
       tags: [webhook endpoints]
@@ -322,9 +405,12 @@ paths:
                 required: [data]
                 properties:
                   data: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/Internal' }
 
     delete:
       tags: [webhook endpoints]
@@ -335,8 +421,11 @@ paths:
       responses:
         '204':
           description: Removed. No body.
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '500': { $ref: '#/components/responses/Internal' }
 
   /v1/webhook_endpoints/{id}/test:
     parameters:
@@ -382,8 +471,11 @@ paths:
                       duration_ms:
                         type: integer
                         description: How long the attempt took.
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '500': { $ref: '#/components/responses/Internal' }
 
 components:
   securitySchemes:
@@ -560,6 +652,13 @@ components:
               code:
                 type: string
                 enum: [invalid_format, taken, blocked_scheme, blocked_host, blocked_address, dns_failure]
+              detail:
+                type: string
+                description: |
+                  Why this one field was refused, when courier has something to add
+                  to `code` — a bad `limit` reads "is not a positive integer"
+                  rather than only `invalid_format`. Present on some entries and
+                  not on others, so a client must not require it.
 
   responses:
     BadRequest:
@@ -576,6 +675,26 @@ components:
             status: 400
             detail: The request body was not valid JSON.
             code: bad_request
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    NotAcceptable:
+      description: |
+        The request's `Accept` header does not include `application/json`, so
+        Phoenix's `:accepts` plug refused to route it. This is the client naming a
+        media type courier cannot answer, and courier says so with
+        `not_acceptable` rather than with `internal`: an earlier version of courier
+        fell through to the `:internal` default here and reported a client that had
+        asked for `text/html` as courier having failed, which is the one code every
+        generated client retries. Reachable on every operation in this document.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/not_acceptable
+            title: Not acceptable
+            status: 406
+            detail: courier answers application/json.
+            code: not_acceptable
             trace_id: 0af7651916cd43dd8448eb211c80319c
 
     Unauthorized:
@@ -607,6 +726,26 @@ components:
             status: 404
             detail: No webhook endpoint with that id.
             code: not_found
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    Internal:
+      description: |
+        courier failed and the client did nothing wrong. **Every operation in this
+        document can answer this one**: it is what `Phoenix.Endpoint.RenderErrors`
+        renders for any unhandled raise, including a database that has stopped
+        answering. The envelope is courier's and carries the request's
+        `trace_id`; the cause is in courier's logs under that id and is not
+        repeated to the caller, because these bodies are read by anyone who can
+        reach the service.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/internal
+            title: Internal server error
+            status: 500
+            detail: The request could not be completed.
+            code: internal
             trace_id: 0af7651916cd43dd8448eb211c80319c
 
     ValidationFailed:

@@ -544,6 +544,264 @@ defmodule CourierWeb.OpenAPIPathsTest do
     end
   end
 
+  describe "reading responses out of a document" do
+    # The route reader's discipline, applied to the response reader. Every case
+    # here is a document that would make the check pass for the wrong reason, or
+    # report a promise the document does not actually make.
+
+    defp responses_for(lines) do
+      lines |> write_document() |> Paths.document_responses!()
+    end
+
+    defp a_document_with_responses do
+      write_document([
+        "openapi: 3.1.0",
+        "paths:",
+        "  /v1/widgets:",
+        "    get:",
+        "      responses:",
+        "        '200':",
+        "          description: a page",
+        "          content:",
+        "            application/json:",
+        "              schema:",
+        "                type: object",
+        "        '400': { $ref: '#/components/responses/BadRequest' }",
+        "  /v1/widgets/{id}:",
+        "    get:",
+        "      responses:",
+        "        '200':",
+        "          description: one",
+        "        '404': { $ref: '#/components/responses/NotFound' }",
+        "components:",
+        "  responses:",
+        "    BadRequest:",
+        "      description: bad",
+        "      content:",
+        "        application/problem+json:",
+        "          schema: { $ref: '#/components/schemas/Problem' }",
+        "    NotFound:",
+        "      description: gone",
+        "      content:",
+        "        application/problem+json:",
+        "          schema: { $ref: '#/components/schemas/Problem' }"
+      ])
+    end
+
+    test "it reads each operation's statuses, and the keys are bare" do
+      responses =
+        responses_for([
+          "paths:",
+          "  /v1/widgets:",
+          "    get:",
+          "      responses:",
+          "        '200':",
+          "          description: ok",
+          "        '404': { $ref: '#/components/responses/NotFound' }",
+          "        '500':",
+          "          description: broke",
+          "components:",
+          "  responses:",
+          "    NotFound:",
+          "      description: gone"
+        ])
+
+      assert Map.keys(Map.fetch!(responses, {"GET", "/v1/widgets"})) |> Enum.sort() ==
+               ["200", "404", "500"]
+    end
+
+    test "a $ref is followed, so a response that says nothing still knows the envelope" do
+      # This is the whole reason the reader resolves a `$ref`. The one-line
+      # `'404': { $ref: … }` names no media type and no schema; the promise is in
+      # the component it points at, and a reader that stopped at the line would
+      # report every reusable error as unwired.
+      responses = a_document_with_responses() |> Paths.document_responses!()
+
+      not_found = Map.fetch!(Map.fetch!(responses, {"GET", "/v1/widgets/{}"}), "404")
+
+      assert not_found.ref == "NotFound"
+      assert not_found.problem_json
+      assert not_found.ref_schema
+    end
+
+    test "an inline response is read as well as a $ref" do
+      responses =
+        responses_for([
+          "paths:",
+          "  /v1/widgets:",
+          "    get:",
+          "      responses:",
+          "        '200':",
+          "          description: ok",
+          "        '500':",
+          "          description: broke",
+          "          content:",
+          "            application/problem+json:",
+          "              schema:",
+          "                $ref: '#/components/schemas/Problem'",
+          "components:",
+          "  responses:",
+          "    Unused:",
+          "      description: nothing points at it"
+        ])
+
+      internal = Map.fetch!(Map.fetch!(responses, {"GET", "/v1/widgets"}), "500")
+
+      assert internal.ref == nil
+      assert internal.problem_json
+      assert internal.ref_schema
+    end
+
+    test "a $ref to a component the document does not define is an error" do
+      # The failure this reader exists for. A response wired to nothing is
+      # described as though it were wired, and a client generated from it has a
+      # method that answers with a body nobody wrote.
+      assert_raise RuntimeError, ~r/defines no response of that name/, fn ->
+        responses_for([
+          "paths:",
+          "  /v1/widgets:",
+          "    get:",
+          "      responses:",
+          "        '404': { $ref: '#/components/responses/Nowhere' }",
+          "components:",
+          "  responses:",
+          "    SomethingElse:",
+          "      description: defined, but not the one the response points at"
+        ])
+      end
+    end
+
+    test "an operation with no responses: is an error, not an operation with none" do
+      assert_raise RuntimeError, ~r/has no `responses:` block/, fn ->
+        responses_for([
+          "paths:",
+          "  /v1/widgets:",
+          "    get:",
+          "      summary: list",
+          "components:",
+          "  responses:",
+          "    Unused:",
+          "      description: nothing points at it"
+        ])
+      end
+    end
+
+    test "a responses: block with nothing in it is an error" do
+      assert_raise RuntimeError, ~r/is empty/, fn ->
+        responses_for([
+          "paths:",
+          "  /v1/widgets:",
+          "    get:",
+          "      responses:",
+          "components:",
+          "  responses:",
+          "    Unused:",
+          "      description: nothing points at it"
+        ])
+      end
+    end
+
+    test "a method inherits only its own responses, not its sibling's" do
+      # Without the per-method subtree, `POST` would be checked against `GET`'s
+      # promises: a document where `GET` declares a 404 and `POST` does not would
+      # look like both do, and the check could not see a `POST` that never declared
+      # its own failure.
+      responses =
+        responses_for([
+          "paths:",
+          "  /v1/widgets:",
+          "    get:",
+          "      responses:",
+          "        '200':",
+          "          description: ok",
+          "        '404': { $ref: '#/components/responses/NotFound' }",
+          "    post:",
+          "      responses:",
+          "        '201':",
+          "          description: made",
+          "components:",
+          "  responses:",
+          "    NotFound:",
+          "      description: gone"
+        ])
+
+      assert Map.keys(Map.fetch!(responses, {"GET", "/v1/widgets"})) |> Enum.sort() == [
+               "200",
+               "404"
+             ]
+
+      assert Map.keys(Map.fetch!(responses, {"POST", "/v1/widgets"})) |> Enum.sort() == ["201"]
+    end
+
+    test "a path item's own `parameters:` is not an operation with no responses" do
+      responses = a_document_with_responses() |> Paths.document_responses!()
+
+      assert Map.keys(responses) |> Enum.sort() == [
+               {"GET", "/v1/widgets"},
+               {"GET", "/v1/widgets/{}"}
+             ]
+    end
+
+    test "component_responses! reports the media type and the schema separately" do
+      # Two questions, and only the second makes the first true: a response can
+      # name `application/problem+json` over some other schema, which promises
+      # courier's error shape and delivers something else.
+      path =
+        write_document([
+          "paths:",
+          "  /v1/widgets:",
+          "    get:",
+          "      responses:",
+          "        '500': { $ref: '#/components/responses/Lying' }",
+          "components:",
+          "  responses:",
+          "    Lying:",
+          "      description: promises courier's shape",
+          "      content:",
+          "        application/problem+json:",
+          "          schema:",
+          "            $ref: '#/components/schemas/SomethingElse'"
+        ])
+
+      lying = Map.fetch!(Paths.component_responses!(path), "Lying")
+
+      assert lying.problem_json
+      refute lying.ref_schema
+    end
+
+    test "a document with no components: at all is an error, not an empty set" do
+      # A reader that returned `%{}` here would report every `$ref` as dangling,
+      # which is a louder failure than the right one but for the wrong reason.
+      assert_raise RuntimeError, ~r/no top-level `components:`/, fn ->
+        Paths.component_responses!(
+          write_document([
+            "paths:",
+            "  /v1/widgets:",
+            "    get:",
+            "      responses:",
+            "        '200':"
+          ])
+        )
+      end
+    end
+
+    test "it reads courier's own document, and every non-2xx there is wired" do
+      # The reader against the real thing, so a change to `openapi.yaml`'s shape
+      # is caught here rather than as a baffling failure in the check built on it.
+      responses = Paths.document_responses!()
+
+      assert map_size(responses) == 8
+
+      for {_operation, declared} <- responses, {status, response} <- declared do
+        if not String.starts_with?(status, "2") do
+          assert response.problem_json,
+                 "#{status} does not name application/problem+json " <>
+                   "(openapi.yaml:#{response.line})"
+        end
+      end
+    end
+  end
+
   describe "the failure message" do
     setup do
       document = document_for(["paths:", "  /v1/widgets:", "    get:"])

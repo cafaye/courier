@@ -30,12 +30,27 @@ defmodule CourierWeb.Problem do
 
   ## Codes
 
-  Core's reserved list, plus `bad_request`. Core names the reserved list for the
-  statuses it enumerates and says 400 is for malformed syntax the client could
-  not have known; it does not name a slug for it, and a body that is not JSON at
-  all still needs a stable `code` for the same reason every other code is
-  stable. Everything else falls back to `internal`, so an unlisted status still
-  answers with courier's envelope rather than Phoenix's.
+  Core's reserved list, plus `bad_request` and `not_acceptable`. Core names the
+  reserved list for the statuses it enumerates and says 400 is for malformed
+  syntax the client could not have known; it does not name a slug for it, and a
+  body that is not JSON at all still needs a stable `code` for the same reason
+  every other code is stable. The same is true of 406, which Phoenix's `:accepts`
+  plug raises on every request whose `Accept` excludes `json`, and which core
+  does not enumerate.
+
+  `not_acceptable` is here because 406 used to fall through to the `:internal`
+  default. A client that asked for `text/html` and was answered
+  `{"status": 406, "code": "internal", "title": "Internal server error"}` had its
+  own `Accept` header reported back to it as courier failing. Core reserves
+  `internal` for 500, so a 406 wearing that slug is a lie in the
+  machine-readable contract — and it is the kind of lie a generated client turns
+  into a retry loop, because "internal" is the one code every client retries.
+
+  Everything else still falls back to `internal`, so an unlisted status answers
+  with courier's envelope rather than Phoenix's. `for_status/1` is the seam, and
+  every status courier can be made to return has a line in the table above it;
+  `test/courier_web/openapi_error_responses_test.exs` is what keeps the two in
+  step.
   """
 
   import Plug.Conn
@@ -47,6 +62,7 @@ defmodule CourierWeb.Problem do
     unauthorized: {401, "Unauthorized"},
     forbidden: {403, "Forbidden"},
     not_found: {404, "Not found"},
+    not_acceptable: {406, "Not acceptable"},
     conflict: {409, "Conflict"},
     unsupported_media_type: {415, "Unsupported media type"},
     validation_failed: {422, "Validation failed"},

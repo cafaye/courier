@@ -18,6 +18,65 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
 
 ### Added
 
+- **`openapi.yaml` now declares every error it can return, and a test proves the
+  document and the code agree about them.** courier-12 was opened on a claim that
+  the RFC 9457 envelope was defined in `components` and wired to nothing.
+  Re-measured, that specific claim no longer reproduced — courier-05 had already
+  attached the envelope to all four responses the document declared. What did
+  reproduce, and what this closes, is the version of the same defect one level
+  down: **every one of the eight operations could answer a `500` and a `406`, and
+  none of them declared either.** A client generated from this document had no
+  way to learn that. All eight now declare both, and `info.version` goes
+  `1.2.0` → `1.3.0` — a minor bump, because no path changed, no operation was
+  added or removed, and no request or response that already existed changed
+  shape.
+  - **`400` moved in both directions, because the parser's verb list is not the
+    one it looks like.** `Plug.Parsers` reads a body for `POST`, `PUT`, `PATCH`
+    **and `DELETE`**, so `DELETE /v1/webhook_endpoints/{id}` was reachable at
+    400 and declared nothing — a client that sends a body with its delete gets a
+    response no document described. The mirror of that was already wrong in the
+    document: `GET /v1/notification_preferences/{user_id}` declared a 400, and
+    `Plug.Parsers` **does not read a body on a `GET`**, so that 400 is
+    unreachable and a client generated from it writes a branch that can never
+    run. The 400 is removed there and added to the delete. The new check compares
+    the document against the parser in **both** directions — declared ⇒ reachable
+    and reachable ⇒ declared — for every operation, which is how both halves were
+    found.
+  - **`test/courier_web/openapi_error_responses_test.exs` is the new check**, and
+    it is the language-specific half a neutral harness cannot be: it provokes
+    each status against the running endpoint and asks the document whether it
+    admits it. There is no table of statuses per operation written down in it,
+    because a table is a check that can only fail for a case somebody remembered
+    to type — the operations come from the document and the router, path
+    parameters are filled in mechanically, and the statuses come from sending
+    requests. `test/support/openapi_paths.ex` grew `document_responses!/1` and
+    `component_responses!/1` to read what is declared, and a `$ref` to a
+    component the document does not define is now a raised error rather than a
+    response that looks wired and is not.
+  - **The document's header now admits what courier does *not* return**, with the
+    measured reason for each: `403`, `409`, `415`, `429` and `503` on `/v1`, and
+    `Idempotency-Key`, which courier accepts and ignores. A test asserts both
+    halves — that no operation declares one of those statuses, and that the
+    header says why — so the omission is an admission rather than a silence. The
+    two checks that already existed stay as they were; nothing was weakened.
+- **`errors[].detail` is now declared.** courier has been sending it inside a
+  422's `errors[]` — a bad `limit` reads "is not a positive integer" rather than
+  only `invalid_format` — and the schema did not mention it. It is optional and
+  says so, because only some entries carry one.
+
+### Fixed
+
+- **A `406` no longer reports itself as `internal`.**
+  `CourierWeb.Problem.for_status/1` had no entry for 406, so it fell through to
+  the `:internal` default and a client that asked for `text/html` was answered
+  `{"status": 406, "code": "internal", "title": "Internal server error"}` — its
+  own `Accept` header reported back to it as courier having failed, wearing the
+  one code every generated client retries. `internal` is core's reserved slug
+  for 500. Declaring a 406 in the document while it said that would have put the
+  lie into the permanent contract, so the code was fixed first. Measured over a
+  real socket, because `Phoenix.NotAcceptableError` carries no conn and
+  `Phoenix.ConnTest` cannot see the response it produces.
+
 - **`openapi.yaml` and the router are now held to each other by a test, in both
   directions.** `test/courier_web/openapi_document_test.exs` reads the document
   and `CourierWeb.Router.__routes__/0` and fails if either describes an operation
@@ -52,8 +111,8 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
     workflows directory, which is why the file kit shipped at
     `workflows/ci.reusable.yml` was unreachable from every caller in the fleet.
   - **The gate** — `bin/prime`, unmodified, against a `postgres:17` service
-    container, then each test tier named and counted: 488 in the whole suite,
-    194 without a database, 294 with it, 62 in the SSRF table on its own. Every
+    container, then each test tier named and counted: 564 in the whole suite,
+    252 without a database, 312 with it, 62 in the SSRF table on its own. Every
     count is asserted, so a tier cannot quietly stop running, and a deleted test
     cannot keep the badge green. The files in each tier are derived from the
     case templates, so a new test file cannot fall outside one.

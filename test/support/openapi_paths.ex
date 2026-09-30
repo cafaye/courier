@@ -7,6 +7,24 @@ defmodule Courier.TestSupport.OpenAPIPaths do
   It lives in courier's own `test/support` rather than in a shared helper, so the
   next service that publishes a document copies one file and reads it.
 
+  ## It reads responses too, not only paths
+
+  `document_operations!/1` answers *which routes does this document describe*.
+  That is not the same question as *which responses does it declare*, and a
+  document can pass the first and fail the second: courier-12 found
+  `openapi.yaml` describing eight operations, wiring the RFC 9457 envelope into
+  every response it declared, and declaring no 500 on any of them — a status
+  every one of them could return, and one a generated client needs to know is
+  not a retry.
+
+  So this module also reads each operation's `responses:` block
+  (`document_responses!/1`) and the reusable responses under
+  `components.responses` (`component_responses!/1`), and follows a `$ref` from
+  one to the other. The check built on those is
+  `CourierWeb.OpenAPIErrorResponsesTest`, which is the language-specific half a
+  neutral harness cannot be: it provokes each status against the running
+  endpoint and asks the document whether it admits it.
+
   ## Both sets are read, neither is written down
 
   The document's operations come from `openapi.yaml` and the router's come from
@@ -44,6 +62,15 @@ defmodule Courier.TestSupport.OpenAPIPaths do
       anything else is an error rather than a guess.
     * A key under a path is an operation if it is one of the eight HTTP method
       names and nothing else. `getaway:` is not a `GET`.
+    * A key under an operation's `responses:` is a status if it is three quoted
+      digits, which is how OpenAPI 3.1 writes them (`'404':`). A `default:` key is
+      a response too and is read as `default`, so a document that hides an error
+      behind one cannot slip past unnoticed.
+    * `application/problem+json` is recognised as a **key** under a response's
+      `content:`, wherever its value sits. How a media type maps to a schema is
+      YAML parsing, and this reader does not parse YAML — but the question the
+      check asks is "does this response name the problem media type at all", and
+      that is a key at a known level.
 
   Anything outside that subset raises. A service that needs a real parser should
   add one and delete this; the check itself does not change.
@@ -286,6 +313,312 @@ defmodule Courier.TestSupport.OpenAPIPaths do
     |> String.split("/")
     |> Enum.map_join("/", &rewrite_segment/1)
     |> strip_trailing_slash()
+  end
+
+  # --- reading responses out of a document -------------------------------------
+
+  @typedoc """
+  One response, as the document declares it.
+
+    * `:status` — `"404"`, or `"default"` for OpenAPI's catch-all key.
+    * `:ref` — the `#/components/responses/…` this response points at, or `nil`
+      when it is written out inline.
+    * `:problem_json` — whether the response names `application/problem+json`,
+      following a `$ref` into `components.responses` when there is one. This is
+      the field that answers "is the envelope attached, or merely defined?".
+    * `:ref_schema` — whether it points at `#/components/schemas/Problem`, so a
+      response can claim the media type while carrying a different body.
+    * `:line` — where in the document it is, so a failure names a line.
+  """
+  @type response :: %{
+          status: String.t(),
+          ref: String.t() | nil,
+          problem_json: boolean(),
+          ref_schema: boolean(),
+          line: pos_integer()
+        }
+
+  @typedoc "Every declared response, keyed by the same `{method, path}` as the routes."
+  @type responses :: %{{String.t(), String.t()} => %{optional(String.t()) => response()}}
+
+  @doc """
+  Every response every operation declares, or a raised error.
+
+  A `$ref` to `#/components/responses/…` is resolved through
+  `component_responses!/1`, so a response that says nothing itself is still known
+  to carry the envelope. **A `$ref` that names a component the document does not
+  define is an error**, because that is precisely the shape this reader exists to
+  catch: a response wired to nothing, described as though it were wired.
+
+  Every operation must have a `responses:` block with at least one status in it.
+  An operation with no `responses:` raises rather than contributing an empty map,
+  because an empty map is a set that agrees with every other empty map.
+  """
+  @spec document_responses!(Path.t()) :: responses()
+  def document_responses!(path \\ "openapi.yaml") do
+    lines = document_lines!(path)
+    components = component_responses!(path)
+    block = paths_block!(path, lines)
+    {path_level, method_level} = levels!(path, block)
+
+    block
+    |> groups(path_level)
+    |> Enum.reduce(%{}, fn [{_indent, text, _number} | children], acc ->
+      current = String.trim_trailing(text, ":")
+
+      if path?(current) do
+        children
+        |> method_subtrees(method_level)
+        |> Enum.reduce(acc, fn {method, line, subtree}, inner ->
+          operation = normalise_operation(method, current)
+
+          put_responses!(
+            inner,
+            operation,
+            responses!(path, method, current, line, subtree, components)
+          )
+        end)
+      else
+        acc
+      end
+    end)
+  end
+
+  # Two methods on one path that normalise onto one operation is a collision, and
+  # the same collision guard the route reader has. Without it the second would
+  # overwrite the first and the check would compare one operation's promises
+  # against the other's.
+  defp put_responses!(acc, key, responses) do
+    case Map.fetch(acc, key) do
+      {:ok, existing} ->
+        {method, path} = key
+
+        raise "two operations both read as #{method} #{path}, so the responses declared " <>
+                "for one would be checked against the other. The first declares " <>
+                "#{inspect(Enum.sort(Map.keys(existing)))}, the second " <>
+                "#{inspect(Enum.sort(Map.keys(responses)))}."
+
+      :error ->
+        Map.put(acc, key, responses)
+    end
+  end
+
+  @doc """
+  Every reusable response under `components.responses`, or a raised error.
+
+  Keyed by the name a `$ref` would use. Each entry says whether it names
+  `application/problem+json` and whether its body is `#/components/schemas/Problem`,
+  which are two different questions: the first is the content type a client
+  switches on, the second is the shape it parses. A response can be right about
+  one and wrong about the other, and only the second one makes the first true.
+  """
+  @spec component_responses!(Path.t()) :: %{optional(String.t()) => response()}
+  def component_responses!(path \\ "openapi.yaml") do
+    lines = document_lines!(path)
+
+    case Enum.find(lines, fn {indent, text, _} -> indent == 0 and text == "components:" end) do
+      nil ->
+        raise "#{path} has no top-level `components:` key. A reusable response is " <>
+                "defined there, and a reader that cannot find them cannot tell a " <>
+                "response that carries the envelope from one that only says it does."
+
+      {_indent, _text, number} ->
+        rest = Enum.drop_while(lines, fn {_i, _t, n} -> n <= number end)
+
+        case Enum.find(rest, fn {indent, text, _} ->
+               indent == 2 and text == "responses:"
+             end) do
+          nil ->
+            %{}
+
+          entry ->
+            rest
+            |> Enum.drop_while(fn {_i, _t, n} -> n <= elem(entry, 2) end)
+            |> Enum.take_while(fn {indent, _t, _n} -> indent > 2 end)
+            |> groups(4)
+            |> Enum.reduce(%{}, fn [{_i, text, line} | subtree], acc ->
+              name = String.trim_trailing(text, ":")
+              shape = component_shape(subtree)
+
+              Map.put(
+                acc,
+                name,
+                %{
+                  status: name,
+                  ref: nil,
+                  problem_json: shape.problem_json,
+                  ref_schema: shape.ref_schema,
+                  line: line
+                }
+              )
+            end)
+        end
+    end
+  end
+
+  # The `responses:` block of one operation, or a raise.
+  #
+  # `subtree` is the operation's own lines: the method key, everything under it,
+  # and nothing belonging to a sibling method. The status keys are the least-
+  # indented lines in the block, because `responses:` is immediately followed by
+  # them and nothing else is allowed to be shallower.
+  defp responses!(path, method, current, line, subtree, components) do
+    case Enum.find(subtree, fn {indent, text, _} -> indent > 0 and text == "responses:" end) do
+      nil ->
+        raise "#{path}:#{line} — #{method} #{current} has no `responses:` block. An " <>
+                "operation that declares no response declares no contract: a client " <>
+                "generated from it cannot know what success looks like, let alone " <>
+                "what failure does."
+
+      {indent, _text, number} ->
+        block =
+          Enum.drop_while(subtree, fn {_i, _t, n} -> n <= number end)
+          |> Enum.take_while(fn {i, _t, _n} -> i > indent end)
+
+        if block == [] do
+          raise "#{path}:#{number} — the `responses:` block of #{method} #{current}, " <>
+                  "declared at line #{line}, is empty. An empty responses object and a " <>
+                  "missing one are the same absence, and neither is something a client " <>
+                  "can be generated from."
+        end
+
+        level = block |> Enum.map(&elem(&1, 0)) |> Enum.min()
+
+        responses =
+          Enum.reduce(
+            each_status(block, level),
+            %{},
+            &collect_status(&1, &2, path, method, current, components)
+          )
+
+        Map.put(responses, "", %{
+          status: "",
+          ref: nil,
+          problem_json: false,
+          ref_schema: false,
+          line: number
+        })
+        |> Map.delete("")
+    end
+  end
+
+  # Each status key in a `responses:` block, with the lines that are its body.
+  defp each_status(block, level) do
+    block
+    |> Enum.with_index()
+    |> Enum.filter(fn {{indent, _text, _n}, _i} -> indent == level end)
+    |> Enum.map(fn {{indent, text, number}, index} ->
+      body =
+        block
+        |> Enum.slice(index, length(block) - index)
+        |> Enum.take_while(fn {i, _t, _n} -> i >= indent end)
+
+      {text, number, body}
+    end)
+  end
+
+  defp collect_status({text, line, body}, acc, path, method, current, components) do
+    status = status_key(text)
+    ref = component_ref(body)
+
+    resolved =
+      case ref do
+        # An inline response answers for itself. A `$ref` is followed into the
+        # component, because the one-line form names no media type and no schema
+        # and the promise is in the component it points at.
+        nil ->
+          component_shape(body)
+
+        name ->
+          Map.get(components, name) ||
+            raise(
+              "#{path}:#{line} — #{method} #{current} points at " <>
+                "#/components/responses/#{name}, and this document defines no response " <>
+                "of that name. This is the failure this reader exists for: a response " <>
+                "wired to nothing, described as though it were wired. Define the " <>
+                "component, or point the response at one that exists."
+            )
+      end
+
+    Map.put(acc, status, %{
+      status: status,
+      ref: ref,
+      problem_json: resolved.problem_json,
+      ref_schema: resolved.ref_schema,
+      line: line
+    })
+  end
+
+  # The component name a response points at, or `nil` when it is inline.
+  defp component_ref(body) do
+    body
+    |> Enum.find_value(fn {_indent, text, _n} ->
+      case Regex.run(~r/#\/components\/responses\/([A-Za-z0-9_.-]+)/, text) do
+        [_, name] -> name
+        _ -> nil
+      end
+    end)
+  end
+
+  @problem_json "application/problem+json:"
+
+  @doc false
+  # Two questions a response has to answer about itself, and only the second makes
+  # the first true: does it NAME the problem media type, and is its body
+  # `#/components/schemas/Problem`? A response can name the media type over some
+  # other schema, which is a content type that promises courier's error shape and
+  # delivers something else.
+  defp component_shape(subtree) do
+    %{
+      problem_json:
+        Enum.any?(subtree, fn {indent, text, _n} ->
+          text == @problem_json and indent > 0
+        end),
+      ref_schema:
+        Enum.any?(subtree, fn {_indent, text, _n} ->
+          String.contains?(text, "#/components/schemas/Problem")
+        end)
+    }
+  end
+
+  # `'404':` on its own, or `'404': { $ref: '#/components/responses/NotFound' }` on
+  # one line. OpenAPI 3.1 writes status keys quoted, and this document writes the
+  # reusable ones inline, so the key is the quoted run at the start of the line
+  # rather than the whole line.
+  defp status_key(text) do
+    case Regex.run(~r/^'([0-9A-Za-z]+)':/, text) do
+      [_, key] -> key
+      _ -> String.trim_trailing(text, ":")
+    end
+  end
+
+  # Each method under a path, with its own subtree: the method line and every
+  # following line until the next line at or above the method level. Without this
+  # a method would inherit its sibling's `responses:`, and `POST` would be checked
+  # against `GET`\'s promises.
+  defp method_subtrees(children, method_level) do
+    starts =
+      for {entry, index} <- Enum.with_index(children),
+          elem(entry, 0) == method_level,
+          method?(String.trim_trailing(elem(entry, 1), ":")),
+          do: {elem(entry, 1), elem(entry, 2), index}
+
+    for {text, number, index} <- starts do
+      rest = Enum.drop(children, index + 1)
+
+      take =
+        Enum.find_index(rest, fn {indent, _text, _n} -> indent <= method_level end) ||
+          length(rest)
+
+      {String.trim_trailing(text, ":"), number, Enum.slice(children, index, take + 1)}
+    end
+  end
+
+  defp document_lines!(path) do
+    case File.read(path) do
+      {:ok, contents} -> significant_lines(contents)
+      {:error, reason} -> raise "could not read #{path}: #{:file.format_error(reason)}"
+    end
   end
 
   # --- reading a document -----------------------------------------------------
