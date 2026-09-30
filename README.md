@@ -21,6 +21,31 @@ test`. It needs a Postgres at `localhost:5432` as `postgres`/`postgres` —
 Before committing a change, `mix precommit`: warnings-as-errors, unused deps
 dropped from the lockfile, formatted, suite green.
 
+## CI
+
+`.github/workflows/ci.yml` calls `cafaye/kit`'s reusable workflow for the shared
+half and adds the two jobs kit cannot own:
+
+| Job       | What it is                                                                                                    | Why it is not in kit's workflow                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `ci`      | `uses: cafaye/kit/.github/workflows/ci.reusable.yml@master`, `language: elixir`, toolchain pinned from `mise.toml` | — that is kit's job, and it is the only copy                                                                 |
+| `gate`    | `bin/prime` against a `postgres:17` service, each test tier named and counted, a `git diff --exit-code` guard on `mix.lock`, and a coverage floor | A caller cannot pass `services:` to a reusable workflow, and the floors are courier's numbers |
+| `release` | `mix release` on the pinned toolchain, and the boot contract for `COURIER_SECRET_BOX_KEY`                          | kit builds no image, and only courier knows its release needs a key it must refuse to default        |
+
+Two things a reader should know before trusting a green run:
+
+- **The floors are decrease detectors, not targets.** 488 tests, 194 of them
+  without a database, 294 with it, and 62 in the SSRF table. Delete one and CI
+  goes red. Add one and CI goes red until the floor is raised, which is the
+  intended direction.
+- **The `ci` job is expected to be red today**, on `test` (kit runs a bare
+  `mix test`, which is `ecto.create` first, in a job with no database) and on
+  `coverage` (kit runs `mix coveralls --minimum-coverage N`; the task is in
+  `excoveralls`, the flag does not exist, and the command needs an explicit
+  `MIX_ENV=test`). Both are in kit's file. The floor is enforced in `gate`, where
+  it can be. Delete the `ci` job when kit's Elixir job grows a `services`/`env`
+  seam — and not before.
+
 ## Probes
 
 | Endpoint  | Meaning   | 200                                    | 503                                            |
@@ -68,6 +93,10 @@ lib/courier_web/controllers/health_controller.ex  the two probes
 lib/courier_web/router.ex                      probes at the root, /api reserved
 test/courier/…                                  readiness check, unit
 test/courier_web/…                              probes incl. the DB-down path, routes
+.github/workflows/ci.yml                        calls kit, plus gate and release
+bin/prime                                       the gate: deps, database, tests
+bin/assert-suite                                refuses a run that skipped the hard part
+bin/toolchain-pins                              the one toolchain pin, read from mise.toml
 Dockerfile                                      two-stage release build, slim final
 docker-compose.yml                              postgres:17 + the release image
 cafaye.yml                                      the manifest (draft, see below)

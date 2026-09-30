@@ -18,6 +18,42 @@ events to customer HTTP endpoints with the Standard Webhooks signature scheme.
 
 ### Added
 
+- **CI, and it calls `cafaye/kit` rather than copying it** —
+  `.github/workflows/ci.yml` is a six-line `uses:` for kit's reusable workflow
+  plus the two jobs kit cannot own. It is the first CI this repository has had:
+  every "the gate is green" claim for courier so far rested on whoever ran the
+  suite by hand, on that day, on that machine.
+  - **The shared half** — `uses: cafaye/kit/.github/workflows/ci.reusable.yml@master`
+    with `language: elixir`, the working directory, the toolchain pinned from
+    `mise.toml`, a coverage floor, and telemetry off. The `.github/workflows/`
+    in that path is load bearing: GitHub does not resolve subdirectories of the
+    workflows directory, which is why the file kit shipped at
+    `workflows/ci.reusable.yml` was unreachable from every caller in the fleet.
+  - **The gate** — `bin/prime`, unmodified, against a `postgres:17` service
+    container, then each test tier named and counted: 488 in the whole suite,
+    194 without a database, 294 with it, 62 in the SSRF table on its own. Every
+    count is asserted, so a tier cannot quietly stop running, and a deleted test
+    cannot keep the badge green. The files in each tier are derived from the
+    case templates, so a new test file cannot fall outside one.
+  - **The lockfile guard** — `git diff --exit-code -- mix.lock` after the gate. A
+    prime that resolves differently lets two worktrees disagree about one commit,
+    and a green suite cannot see that.
+  - **The release and its boot contract** — `mix release` on the pinned
+    toolchain (the only thing here that compiles in `:prod`), then three
+    assertions: the release refuses to boot without `COURIER_SECRET_BOX_KEY` and
+    names it, accepts a test-only key and then refuses on `DATABASE_URL`, and
+    with both set seals under the key it was given. The key used there is a
+    test-only fixture; nothing in `config/runtime.exs` reads a default, and the
+    first assertion is the proof.
+- **`bin/assert-suite`** — asserts a `mix test` run executed everything it
+  reports. It accepts exactly one shape of ExUnit's summary (`Result: N passed`)
+  and fails on a fraction, on a skipped or excluded count, and on `0 tests`, so a
+  run cannot satisfy itself by having verified less.
+- **`bin/toolchain-pins`** — reads the `[tools]` pins out of `mise.toml` so CI
+  builds with the toolchain `mise install` gives a developer, and checks kit's
+  `versions:` input against the same file, so the one version literal GitHub
+  cannot avoid cannot drift into a second toolchain.
+
 - **Outbound webhooks, signed per [Standard Webhooks](https://www.standardwebhooks.com)**
   — PLAN.md §7 adopted the spec with "No custom scheme", so a consumer verifies a
   courier delivery with an official library (Svix's, Twilio's, Kong's,

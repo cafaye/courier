@@ -8,6 +8,11 @@ defmodule Courier.MixProject do
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      # The coverage tool, named here rather than discovered at run time.
+      # `mix test --cover` writes `cover/` and enforces nothing; this is what
+      # makes `mix coveralls --minimum-coverage` work, which is the command both
+      # this repository's CI gate and kit's shared Elixir job run.
+      test_coverage: [tool: ExCoveralls],
       aliases: aliases(),
       deps: deps(),
       listeners: [Phoenix.CodeReloader]
@@ -55,7 +60,23 @@ defmodule Courier.MixProject do
       # `:req` (`Req`) library for HTTP requests, avoid `:httpoison`, `:tesla`, and
       # `:httpc`"), so the webhook pipeline uses it rather than `:httpc` from OTP or
       # a second client library.
-      {:req, "~> 0.5"}
+      {:req, "~> 0.5"},
+      # `mix coveralls` — the coverage gate kit's shared Elixir job runs, and the
+      # one this repository's own CI job runs. Two things about it are load
+      # bearing and neither is guessable:
+      #
+      #   - The task ships in **excoveralls**. The hex package named `coveralls`
+      #     is the Erlang one and has no Mix task at all, so declaring that
+      #     leaves the gate dying on "the task coveralls could not be found".
+      #   - `dev` is in the list on purpose. The job fetches dependencies with a
+      #     plain `mix deps.get` (development) and then runs `mix coveralls`,
+      #     which is `@preferred_cli_env :test`. A dep that is only in `:test` is
+      #     never fetched by the first command, and the second one fails on a
+      #     missing dependency rather than on a coverage number.
+      #
+      # `runtime: false`, and no `:prod`, so a measurement tool is neither
+      # started nor shipped in the release.
+      {:excoveralls, "~> 0.18.5", only: [:dev, :test], runtime: false}
     ]
   end
 

@@ -81,6 +81,9 @@ test/support/recording_sender.ex      a sender that records instead of sending
 test/support/header_resolver.ex       a principal that reads a header
 test/support/test_dns.ex              a resolver that answers from a table
 bin/prime                             the gate: deps, database, tests
+bin/assert-suite                      refuses a run that skipped or excluded tests
+bin/toolchain-pins                    reads mise.toml, checks CI has not drifted
+.github/workflows/ci.yml              calls kit's workflow, plus gate and release
 Dockerfile                            two-stage release build, slim final stage
 docker-compose.yml                    postgres:17 plus the release image
 rel/overlays/bin/server               the release entrypoint the image runs
@@ -115,6 +118,30 @@ pipeline are Phase 3 packets — not this one, not "just to prepare".
 **`mix precommit` before you commit.** It compiles with warnings-as-errors,
 drops unused deps from the lockfile, formats, and runs the suite. `bin/prime`
 is the gate for a clean checkout; `mix precommit` is what a change must pass.
+
+**The CI gate is `bin/prime`, the same command, not a CI variant of it.** If the
+two can disagree, one of them is lying. The workflow adds a database, the tier
+counts and the lockfile guard *around* that command; it does not reimplement it.
+
+**A tier that CI cannot name is a tier nobody ran.** The suite partitions
+exactly, by the case template: 194 tests in the 10 files that never touch
+`Courier.Repo`, 294 in the 16 that do, and `mix test` is aliased to
+`ecto.create` first, so a runner with no database executes *zero* of the 488 —
+SSRF table included. Both counts are asserted in CI by `bin/assert-suite`, and
+the SSRF table gets its own 62-test run so the log carries a line that can only
+exist if that harness ran. **When you add or delete a test, raise the floor in
+`.github/workflows/ci.yml` in the same commit.** Deleting a test to make CI green
+is caught by the floor; adding one is caught because CI goes red until you raise
+it. Both are one-line diffs, and only one of them changes what courier verifies.
+
+**The toolchain is pinned in `mise.toml` and nowhere else.** `bin/toolchain-pins`
+is how CI reads it, so the workflow cannot disagree with the worktree; the one
+unavoidable duplicate is kit's `versions:` input, and `bin/toolchain-pins
+--check` fails when that line and `mise.toml` stop matching. Bump both or neither.
+
+**`mix.lock` must not move when the gate runs.** A prime that resolves
+differently is a prime that lets two worktrees disagree about one commit, and the
+suite cannot see it. CI runs `git diff --exit-code -- mix.lock` after `bin/prime`.
 
 **`async: false` is a comment, not a shrug.** If your test stops or restarts a
 process the suite shares — `Courier.Repo`, the endpoint, the Oban queue — it must

@@ -1,0 +1,431 @@
+---
+# courier's CI.
+#
+# Three jobs, and the split between them is the whole point of this file:
+#
+#   ci       calls kit's reusable workflow. The shared half — one `uses:` line,
+#            no copy of anything, so a fix in kit reaches courier on the next run.
+#   gate     the service-specific half. A database, the gate itself, the tier
+#            counts, the lockfile guard, the coverage floor.
+#   release  the build that actually ships, and the boot contract.
+#
+# WHY THE COMPANION JOBS CANNOT LIVE IN THE SHARED WORKFLOW
+#
+#   kit is configuration, and a step that knows what courier needs in order to be
+#   tested at all is not configuration — it is courier. Specifically:
+#
+#   1. A database. `mix test` in courier is aliased to
+#      `ecto.create ++ ecto.migrate ++ test` (mix.exs), so a runner with no
+#      postgres aborts *before the first test executes*: 0 of 488 run, exit 1.
+#      A caller cannot hand a reusable workflow a service container — GitHub
+#      allows only `name`, `uses`, `with`, `secrets`, `strategy`, `needs`, `if`,
+#      `concurrency` and `permissions` on a job that calls one, so `services:`
+#      is not reachable from here at all. kit also must not hard-code a
+#      database, or the five services that are not courier inherit one.
+#
+#   2. The gate is a repository command, not a workflow concept. `bin/prime` is
+#      what a developer runs, and it is what this job runs. A shared workflow
+#      that retyped those steps would be a second gate, and a second gate is a
+#      second thing to be wrong.
+#
+#   3. The tier counts. The floors below are courier's numbers, in courier's
+#      tree. No other repository has 294 database tests or a 62-case SSRF table.
+#
+#   4. The lockfile guard, the coverage floor, and the release build: all three
+#      are courier's lockfile, courier's threshold, and courier's release.
+#
+# WHAT IS EXPECTED TO BE RED TODAY, AND WHY IT IS STILL HERE
+#
+#   The `ci` job is expected to be red on master, on two steps, for reasons that
+#   live in kit's file and not in this one:
+#
+#   - `test` runs a bare `mix test`, which is `ecto.create` first. There is no
+#     postgres in that job (see 1 above), so it dies before any test runs.
+#   - `coverage` runs `mix coveralls --minimum-coverage N`. `mix coveralls`
+#     comes from **excoveralls** — the hex package named `coveralls` is the
+#     Erlang one and has no Mix task at all — excoveralls has no
+#     `--minimum-coverage` flag (it hands unknown flags to `mix test`, which
+#     rejects them), and this repository's `def cli` sets
+#     `preferred_envs: [precommit: :test]`, which shadows the task's own
+#     `@preferred_cli_env :test`, so the command also needs an explicit
+#     `MIX_ENV=test` that kit's step does not pass.
+#
+#   So the coverage floor is enforced in `gate`, where it can be, from the same
+#   number passed to kit as `coverage-fail-under`. Delete this job when kit's
+#   Elixir job grows a `services`/`env` seam — and not before, on the strength
+#   of a green `ci` job, because there will not be one until then.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # "Prove it runs": `gh workflow run ci` re-runs everything on demand, and it
+  # is the only way to run this on a branch that has no pull request.
+  workflow_dispatch:
+
+# Least privilege for the whole file. kit's reusable workflow declares the same,
+# and a caller should not widen what it is granted by accident.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  # The shared half.
+  #
+  # The `.github/workflows/` in this path is not decoration. GitHub resolves a
+  # cross-repository reusable workflow at
+  # `{owner}/{repo}/.github/workflows/{file}@{ref}` and documents that
+  # subdirectories of the workflows directory are not supported, so a
+  # `uses: cafaye/kit/workflows/ci.reusable.yml@master` line resolves to nothing
+  # and the build is red before it starts. kit-04 owns that move.
+  #
+  # The input names are kit's own, read from kit's README.md ("How a service repo
+  # adopts kit") and the `on.workflow_call` block of the workflow itself.
+  ci:
+    name: ci (kit)
+    uses: cafaye/kit/.github/workflows/ci.reusable.yml@master
+    with:
+      language: elixir
+      # The directory holding mix.exs. The repository is flat, so this is '.'.
+      working-dir: .
+      # The toolchain, pinned, from mise.toml's `[tools]`. kit's default is a
+      # floating `1.18`/`27`, which is the opposite of a pin. This is the one
+      # place a version is written twice — GitHub cannot read a file into a
+      # `with:` input — and the `gate` job fails if it and mise.toml disagree.
+      versions: '{"elixir":"1.20.4-otp-29","erlang":"29.1.1"}'
+      # 86.3% measured on the commit that added this line; the floor is 80 so an
+      # unrelated change cannot red the build, and raising it is a one-line diff.
+      # kit's own note is that a threshold left at 0 fails nothing.
+      coverage-fail-under: '80'
+      # A string, and 'false', on purpose. courier has not copied
+      # kit/templates/otel/elixir/, so the conformance job would run kit's own
+      # copy of the suite and prove something about kit rather than about
+      # courier. The moment courier copies the template *with* its suite, this
+      # becomes 'true' and a claim about propagation becomes a red build.
+      telemetry: 'false'
+
+  # --------------------------------------------------------------------------
+  # The gate.
+  #
+  # Runs the same command a developer runs, against a database it provisions
+  # itself, and then proves each environment-gated tier actually ran by naming
+  # it and counting it. PLAN.md §1: a suite that exits 0 with tests skipped has
+  # run less than it appears to, and a gate that skips is not green.
+  gate:
+    name: gate (bin/prime, tiers, lockfile, coverage)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to the major in docker-compose.yml. An unpinned `postgres`
+        # means the suite's result depends on which tag was cached when the job
+        # started.
+        image: postgres:17
+        env:
+          # The credentials config/test.exs hard-codes, so `mix ecto.setup` and
+          # every sandbox checkout find the server they were written for.
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        # The health check is what makes the tier deterministic rather than
+        # lucky: without it the first `mix ecto.create` races the server and the
+        # database tier is the thing that flakes. `pg_isready` is true when the
+        # server accepts connections, not when the container process is up.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 5s
+
+    env:
+      # TEST-ONLY VALUE. Not a production default, and not treated as one.
+      # `config/runtime.exs` requires COURIER_SECRET_BOX_KEY in prod and refuses
+      # to boot without it, because a default would be a key in version control
+      # that every deployment which forgot to set one would seal its customers'
+      # credentials under. This job must not invent a value production would
+      # accept, so:
+      #   - `mix test` never reads it. config/test.exs sets its own fixed
+      #     test-only key; the `release` job is the one that exercises the prod
+      #     path, and it asserts the refusal as well as the success.
+      # It is set here only so the one variable that looks like a secret is
+      # visibly a test value rather than a hole in the contract.
+      COURIER_SECRET_BOX_KEY: Y291cmllci10ZXN0LW9ubHkta2V5LTMyLWJ5dGVzISE=
+      # The coverage floor, read by the coverage step and printed in the summary.
+      # The same number is passed to kit above; this is the copy that is checked.
+      COVERAGE_FAIL_UNDER: '80'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: read the toolchain pins from mise.toml
+        id: pins
+        # mise.toml is the repository's `[tools]` pin and CI does not get to have
+        # a second one. Reading it here means this job builds with the toolchain
+        # `mise install` gives a developer, by construction rather than by
+        # review. bin/toolchain-pins writes to $GITHUB_OUTPUT, so the pins are
+        # never retyped in a step.
+        run: bin/toolchain-pins
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ steps.pins.outputs.elixir }}
+          otp-version: ${{ steps.pins.outputs.erlang }}
+
+      - name: kit's `versions` input must equal mise.toml
+        # The check that keeps the one unavoidable duplicate from becoming a lie.
+        run: bin/toolchain-pins --check .github/workflows/ci.yml
+
+      - name: the gate
+        # bin/prime, unmodified: `mix local.hex --force`, `mix deps.get`,
+        # `mix ecto.setup`, `mix test`. Not a CI-only variant of it. The status
+        # is captured from the pipeline under `pipefail`, because a pipeline's
+        # exit code is its last command's and a red gate that reads 0 is the
+        # exact shape PLAN.md §1 warns about.
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/prime.log"
+          status=0
+          ./bin/prime 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::bin/prime exited $status — the gate is red" >&2
+            exit "$status"
+          fi
+          bin/assert-suite "$log" "whole suite (bin/prime)" 488
+
+      - name: tier — no database (194 tests, 10 files)
+        # These files never touch `Courier.Repo`. They are gated on a database
+        # anyway, because `mix test` is aliased to `ecto.create` first and aborts
+        # before the first test when there is no server — so this tier is the
+        # proof that a runner without a database verifies nothing at all, SSRF
+        # table included. The file list is derived from the case templates
+        # rather than written out, so a new test file cannot fall outside its
+        # tier, and an empty list is a hard error rather than a whole-suite run.
+        run: |
+          set -euo pipefail
+          grep -rLE 'use (Courier\.DataCase|CourierWeb\.ConnCase)' test --include='*_test.exs' |
+            sort > "$RUNNER_TEMP/nodb-tier.txt"
+          if [ ! -s "$RUNNER_TEMP/nodb-tier.txt" ]; then
+            echo "::error::no-database tier matched no files" >&2
+            echo "  an empty list would run the WHOLE suite and call it a tier" >&2
+            exit 1
+          fi
+          echo "files: $(wc -l < "$RUNNER_TEMP/nodb-tier.txt" | tr -d ' ')"
+          log="$RUNNER_TEMP/nodb.log"
+          status=0
+          xargs mix test < "$RUNNER_TEMP/nodb-tier.txt" 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the no-database tier exited $status" >&2
+            exit "$status"
+          fi
+          bin/assert-suite "$log" "no database" 194
+
+      - name: tier — database (294 tests, 16 files)
+        # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
+        # and therefore through the Ecto SQL sandbox: the SQL layer, the
+        # migrations `mix ecto.setup` applies, Oban's tables, and the
+        # authorization matrix asserted over real requests. This is the tier
+        # that dies without the `services: postgres` block above, which is why
+        # the block is above.
+        run: |
+          set -euo pipefail
+          grep -rlE 'use (Courier\.DataCase|CourierWeb\.ConnCase)' test --include='*_test.exs' |
+            sort > "$RUNNER_TEMP/db-tier.txt"
+          if [ ! -s "$RUNNER_TEMP/db-tier.txt" ]; then
+            echo "::error::database tier matched no files" >&2
+            echo "  an empty list would run the WHOLE suite and call it a tier" >&2
+            exit 1
+          fi
+          echo "files: $(wc -l < "$RUNNER_TEMP/db-tier.txt" | tr -d ' ')"
+          log="$RUNNER_TEMP/db.log"
+          status=0
+          xargs mix test < "$RUNNER_TEMP/db-tier.txt" 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the database tier exited $status" >&2
+            exit "$status"
+          fi
+          bin/assert-suite "$log" "database" 294
+
+      - name: tier — the SSRF table (62 tests, in-memory resolver)
+        # courier-03's table, run on its own so the log carries a line that can
+        # only exist if this harness ran: loopback, link-local, RFC1918, IPv6,
+        # IPv4-mapped IPv6, userinfo-hidden loopback and DNS rebinding, each
+        # asserted one address class at a time, every one of them answered by
+        # Courier.TestSupport.TestDns from a table the test writes. One second
+        # of work, and it is the difference between "the SSRF guard is tested"
+        # and "there is a file about SSRF".
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/ssrf.log"
+          status=0
+          mix test test/courier/webhooks/url_guard_test.exs 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::the SSRF table exited $status" >&2
+            exit "$status"
+          fi
+          bin/assert-suite "$log" "SSRF table (url_guard_test.exs)" 62
+
+      - name: lockfile guard
+        # `bin/prime` runs `mix deps.get`, which is allowed to fetch and is not
+        # allowed to resolve differently. A prime that moves mix.lock is a prime
+        # that can make two worktrees disagree about the same commit, and the
+        # difference is invisible in a green suite. Cheap, and it catches a class
+        # of drift nothing else here would.
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- mix.lock; then
+            echo "::error::bin/prime moved mix.lock; the commit and the lockfile disagree" >&2
+            exit 1
+          fi
+          echo "mix.lock unchanged by the gate"
+
+      - name: coverage
+        # The floor kit's Elixir job cannot enforce (see the header). MIX_ENV=test
+        # is explicit and required: `def cli` sets
+        # `preferred_envs: [precommit: :test]`, which shadows `mix coveralls`'
+        # own `@preferred_cli_env :test`, so without it the task runs the suite
+        # in dev and Mix refuses. `--minimum-coverage` is deliberately absent:
+        # excoveralls has no such flag and hands unknown flags to `mix test`,
+        # which rejects them. So the number is read out of the report and
+        # compared here, which makes this a gate rather than a report.
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/coveralls.log"
+          status=0
+          MIX_ENV=test mix coveralls 2>&1 | tee "$log" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::mix coveralls exited $status" >&2
+            exit "$status"
+          fi
+          total="$(sed -n 's/^\[TOTAL\][[:space:]]*\([0-9.]*\)%.*$/\1/p' "$log" | tail -n 1)"
+          if [ -z "$total" ]; then
+            echo "::error::no [TOTAL] line in the coverage report; nothing was measured" >&2
+            exit 1
+          fi
+          if [ "$(awk -v a="$total" -v b="$COVERAGE_FAIL_UNDER" 'BEGIN { print (a + 0 < b + 0) ? 1 : 0 }')" != 0 ]; then
+            echo "::error::coverage ${total}% is below the ${COVERAGE_FAIL_UNDER}% floor" >&2
+            exit 1
+          fi
+          echo "coverage ${total}% (floor ${COVERAGE_FAIL_UNDER}%)"
+
+      - name: what actually ran
+        # The claim, in the run summary, where a reader looks before believing a
+        # green badge. Every number on this table was asserted by the step named
+        # beside it; none of them is a count of anything.
+        run: |
+          set -euo pipefail
+          {
+            echo "### courier CI — tiers that ran"
+            echo
+            echo "| tier | asserted | checked by |"
+            echo "|---|---|---|"
+            echo "| whole suite (\`bin/prime\`) | 488 passed | \`bin/assert-suite\` |"
+            echo "| no database, 10 files | 194 passed | tier step |"
+            echo "| database, 16 files | 294 passed | tier step |"
+            echo "| SSRF table | 62 passed | tier step |"
+            echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
+            echo "| mix.lock | no diff after the gate | lockfile step |"
+            echo
+            echo "The floors are decrease detectors, not targets: a green run means"
+            echo "nothing was deleted, skipped or excluded since these numbers were"
+            echo "measured. Adding a test turns CI red until the floor is raised, which"
+            echo "is the intended direction."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------------------
+  # The build that ships.
+  #
+  # Nothing else in this file compiles in `:prod`: bin/prime, every `mix test`
+  # and the coverage run are development or test. kit's workflow builds no image
+  # and no release ("No job builds or pushes an image"), and it cannot know that
+  # courier's release carries ERTS, that its boot needs four environment
+  # variables, and that one of them is a key it must refuse to default. That is
+  # courier's contract, so it is courier's job.
+  release:
+    name: release (prod build, boot contract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: read the toolchain pins from mise.toml
+        id: pins
+        # The same `[tools]` pin the gate job uses, read the same way, so the
+        # release assembled here is the release the Dockerfile copies out of
+        # _build/prod on the same two versions.
+        run: bin/toolchain-pins
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ steps.pins.outputs.elixir }}
+          otp-version: ${{ steps.pins.outputs.erlang }}
+
+      - name: build the release
+        # No COURIER_SECRET_BOX_KEY here, deliberately: `mix release` does not
+        # evaluate config/runtime.exs, it copies it into the release to be
+        # evaluated at boot. A build that needed the key would mean the key is a
+        # build input, which is the thing the next step proves it is not.
+        run: |
+          set -euo pipefail
+          MIX_ENV=prod mix deps.get --only prod
+          MIX_ENV=prod mix release --overwrite
+
+      - name: the boot contract
+        # Three assertions, no database and no server, each a process expected to
+        # fail for a named reason:
+        #
+        #   1. no key      -> refuses, and names COURIER_SECRET_BOX_KEY
+        #   2. key, no URL -> got past the key, refuses, and names DATABASE_URL
+        #   3. both        -> boots, and holds the key it was given
+        #
+        # (2) is the one that matters: a lone "it refuses without the key" test
+        # is satisfied by a release that refuses everything.
+        #
+        # The key below is TEST-ONLY, and is the same string as the gate job's.
+        # It is a fixture for this assertion, not a default: nothing in
+        # config/runtime.exs reads a fallback, and (1) is the proof.
+        env:
+          COURIER_SECRET_BOX_KEY: Y291cmllci10ZXN0LW9ubHkta2V5LTMyLWJ5dGVzISE=
+          DATABASE_URL: ecto://postgres:postgres@localhost/courier_test
+          SECRET_KEY_BASE: ci-only-not-a-secret-00000000000000000000000000000000
+        run: |
+          set -euo pipefail
+          rel=_build/prod/rel/courier/bin/courier
+
+          if env -u COURIER_SECRET_BOX_KEY -u DATABASE_URL -u SECRET_KEY_BASE \
+            "$rel" eval 'IO.puts("booted")' > "$RUNNER_TEMP/boot-nokey.log" 2>&1; then
+            echo "::error::the release booted with no COURIER_SECRET_BOX_KEY" >&2
+            exit 1
+          fi
+          if ! grep -q 'COURIER_SECRET_BOX_KEY is missing' "$RUNNER_TEMP/boot-nokey.log"; then
+            echo "::error::the refusal did not name COURIER_SECRET_BOX_KEY" >&2
+            cat "$RUNNER_TEMP/boot-nokey.log" >&2
+            exit 1
+          fi
+          echo "refuses to boot without COURIER_SECRET_BOX_KEY"
+
+          if env -u DATABASE_URL -u SECRET_KEY_BASE \
+            "$rel" eval 'IO.puts("booted")' > "$RUNNER_TEMP/boot-nodb.log" 2>&1; then
+            echo "::error::the release booted with no DATABASE_URL" >&2
+            exit 1
+          fi
+          if ! grep -q 'DATABASE_URL is missing' "$RUNNER_TEMP/boot-nodb.log"; then
+            echo "::error::the refusal did not name DATABASE_URL" >&2
+            cat "$RUNNER_TEMP/boot-nodb.log" >&2
+            exit 1
+          fi
+          echo "accepts the test-only key, then refuses on DATABASE_URL"
+
+          booted="$("$rel" eval 'IO.puts(
+            Application.get_env(:courier, :secret_box_key) ==
+              System.get_env("COURIER_SECRET_BOX_KEY"))')"
+          if [ "$booted" != "true" ]; then
+            echo "::error::the release booted but does not hold the key it was given" >&2
+            exit 1
+          fi
+          echo "boots, and seals under the key it was given"
