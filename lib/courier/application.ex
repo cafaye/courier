@@ -7,6 +7,30 @@ defmodule Courier.Application do
 
   @impl true
   def start(_type, _args) do
+    # The SECOND gate on the provider adapter, and it is deliberately not a
+    # re-run of the first.
+    #
+    # `config/runtime.exs` resolves the adapter from the environment and raises
+    # on an unset or silent one. That gate runs first and, in this tree, is
+    # sufficient on its own — being honest about that is the point, because a
+    # comment claiming this gate catches more than it does would be the same
+    # sin as an overclaimed test.
+    #
+    # What it adds is that it reads the EFFECTIVE configuration
+    # (`Application.get_env/2`) rather than the environment. So it is no longer
+    # checking an intention, it is checking what courier will actually send
+    # through, and it holds when the first gate is bypassed or removed:
+    #
+    #   * `config/runtime.exs` edited to name `Swoosh.Adapters.Local` directly —
+    #     one line, no environment variable, and the previous state of this
+    #     repository was exactly that;
+    #   * any future path that configures the mailer without going through
+    #     `Courier.MailerAdapter` — a release overlay, a runtime config hook, a
+    #     generator. This gate does not care where the value came from.
+    #
+    # Re-checking the environment twice would catch nothing this does not.
+    Courier.MailerAdapter.verify_boot!()
+
     # One line, and only ever on the DISABLED path. It is here rather than in
     # `config/runtime.exs` because configuration cannot log into the store an
     # operator reads. See Courier.Telemetry for the contract this reports on.

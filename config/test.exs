@@ -34,6 +34,17 @@ config :phoenix,
 # Transactional email in test goes to `Swoosh.Adapters.Test`, which hands the
 # message to the process that sent it. That is what makes `assert_email_sent/1`
 # (Swoosh.TestAssertions) work without a provider, a relay, or a socket.
+#
+# `Swoosh.Adapters.Test` is NOT declared a provider courier supports — it is in
+# `Courier.MailerAdapter.silent_adapters/0` and `COURIER_MAIL_ADAPTER=smtp` can
+# never resolve to it. It is configured here, directly, because it is the right
+# adapter for a suite and the wrong one for a deployment, and those are
+# different questions. `Courier.MailerAdapterTest` asserts the two are not
+# confused.
+#
+# The real SMTP adapter is exercised in the same environment by
+# `test/courier/smtp_delivery_test.exs`, which overrides this configuration and
+# points the adapter at a `gen_smtp` server it starts itself.
 config :courier, Courier.Mailer, adapter: Swoosh.Adapters.Test
 
 # Oban in `:manual` testing mode: jobs land in the database, nothing executes in

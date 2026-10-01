@@ -1,0 +1,414 @@
+defmodule Courier.MailerAdapter do
+  @moduledoc """
+  courier's provider adapter, and the refusal that makes the wrong one unreachable.
+
+  A buyer installs courier, sets their SMTP credentials, sends a notification,
+  and it arrives. That sentence was not true before this module existed:
+  `Swoosh.Adapters.Local` renders a message into memory and returns a
+  provider-shaped id without opening a socket, so a released courier accepted
+  every send and mailed nobody. No error, no warning, no email — the worst
+  failure a paid product can have, because it looks like success.
+
+  ## The three options, and why this is the third
+
+  The brief offered three ways to stop the silent default:
+
+    1. **refuse to boot in `:prod`** when the adapter is unset or `Local`
+    2. **log a loud warning** at boot
+    3. **make the adapter required config with no default**
+
+  This is **(1) with (3) underneath it**, and the reasoning is the asymmetry
+  between the failure and the fix. A courier running that cannot send is
+  accepting work, recording outbox rows, and publishing `delivered` events for
+  mail that was never delivered. Every downstream consumer of those events
+  believes a person was told something. A warning does not stop that: it is one
+  line in a log nobody reads, and the deployment looks healthy in the dashboard
+  that matters. A refusal at boot is a deploy that visibly fails, which is the
+  cheapest possible incident — it is caught before the first customer mail, not
+  after a support ticket.
+
+  **(3) is what makes (1) enforceable.** An adapter with no default is a
+  deployment that cannot start unless somebody chose one, so "refuse to boot" is
+  not a special case bolted on; it is the ordinary behaviour of a required
+  setting. The prod path below therefore has no `Local` fallback to remove
+  later — there is nothing there to remove.
+
+  ## What is configured, and from where
+
+  Everything is read from the environment by `config/runtime.exs`, which is the
+  only place that runs in a release before the application starts. The rule
+  follows `COURIER_OTEL_ENDPOINT` (core D16): `<SERVICE>_<THING>`, read at boot,
+  required rather than defaulted where a default would be a working-but-wrong
+  configuration.
+
+      COURIER_MAIL_ADAPTER        smtp — the only adapter that reaches a provider
+      COURIER_SMTP_HOST           required when the adapter is smtp
+      COURIER_SMTP_PORT           default 587, the submission port
+      COURIER_SMTP_USERNAME       required unless COURIER_SMTP_AUTH is `never`
+      COURIER_SMTP_PASSWORD       required unless COURIER_SMTP_AUTH is `never`
+      COURIER_SMTP_AUTH           always (default) | never | if_available
+      COURIER_SMTP_TLS            always (default) | never | if_available
+      COURIER_SMTP_SSL            false (default); true for implicit TLS on 465
+
+  ## A credential is never in a log line
+
+  `describe/1` is the only function in courier that renders adapter
+  configuration for a human, and it prints the host, the port and whether auth is
+  on — never the username and never the password. `smtp_adapter/0` is what the
+  configuration actually receives; `describe/1` is what a startup line gets.
+  They are separate functions precisely so that a change to one cannot leak into
+  the other, and `test/courier/mailer_adapter_credentials_test.exs` asserts the
+  password is absent from a captured log rather than trusting this comment.
+  """
+
+  @default_port 587
+
+  # The adapters that do not reach a provider. `Local` renders into memory;
+  # `Test` hands the message to the process that sent it. Both are correct in
+  # the environment that configures them and both are a defect in `:prod`.
+  @silent_adapters [Swoosh.Adapters.Local, Swoosh.Adapters.Test]
+
+  @doc "The adapters that cannot deliver. Asserted directly by the test file."
+  @spec silent_adapters() :: [module()]
+  def silent_adapters, do: @silent_adapters
+
+  @doc "The default SMTP submission port."
+  @spec default_port() :: pos_integer()
+  def default_port, do: @default_port
+
+  @doc """
+  The `Swoosh` adapter configuration courier runs with, read from the
+  environment.
+
+  Returns a keyword list suitable for
+  `config :courier, Courier.Mailer, <that list>`.
+
+  ## The refusal
+
+  Raises when the adapter is unset, or names one that cannot deliver. Both are
+  refused rather than defaulted, and the messages say what to do:
+
+    * unset — "`COURIER_MAIL_ADAPTER` is missing" with the value to set.
+    * silent — names the adapter and says it never opens a socket.
+
+  A silent adapter is refused in EVERY environment, including `:dev`. That is
+  deliberate and it is the one place this module goes past the brief: dev is
+  where a courier is usually pointed at `Local` and a developer who then proves
+  to themselves that "it works". The escape hatch is `COURIER_MAIL_ADAPTER=none`,
+  which is explicit, greppable, and impossible to reach by forgetting a variable.
+  """
+  @spec adapter!(atom()) :: keyword()
+  def adapter!(env \\ config_env()) do
+    name = env_string("COURIER_MAIL_ADAPTER")
+
+    case name do
+      nil ->
+        raise """
+        COURIER_MAIL_ADAPTER is missing, and courier will not pick one for you.
+
+        courier sends transactional email for the platform, so the adapter is a
+        deployment decision rather than a code change. Without one this process
+        would start, accept every send, and deliver nothing.
+
+        Set it to:
+
+            COURIER_MAIL_ADAPTER=smtp
+            COURIER_SMTP_HOST=smtp.your-provider.com
+
+        `none` is accepted in development only, and means "render into memory and
+        open no socket" — see Courier.MailerAdapter.
+        """
+
+      "none" when env == :prod ->
+        raise """
+        COURIER_MAIL_ADAPTER=none is not permitted in production.
+
+        `none` is the Local adapter: it renders a message into memory, returns a
+        provider-shaped id, and opens no socket. A courier configured with it
+        reports every send as delivered and mails nobody.
+
+        Set COURIER_MAIL_ADAPTER=smtp and the COURIER_SMTP_* variables.
+        """
+
+      "none" ->
+        [adapter: Swoosh.Adapters.Local]
+
+      "smtp" ->
+        smtp_adapter()
+
+      other ->
+        raise """
+        COURIER_MAIL_ADAPTER=#{inspect(other)} is not an adapter courier ships.
+
+        Supported values:
+
+            smtp    Swoosh.Adapters.SMTP — the universal one. Every serious
+                    provider (SES, Postmark, Mailgun, SendGrid, Resend) speaks
+                    SMTP or has an SMTP front.
+            none    Local, development only. Refused in production.
+
+        See Courier.MailerAdapter.
+        """
+    end
+  end
+
+  @doc """
+  Whether `adapter` is one courier can actually deliver through.
+
+  The answer for `:prod` is a hard no for anything in `silent_adapters/0`, which
+  is the property `Courier.Application` checks before it starts.
+  """
+  @spec deliverable?(module() | nil) :: boolean()
+  def deliverable?(nil), do: false
+
+  def deliverable?(adapter) do
+    Code.ensure_loaded?(adapter) and adapter not in @silent_adapters
+  end
+
+  @doc """
+  The second gate: refuse to start when the EFFECTIVE adapter cannot deliver.
+
+  Called from `Courier.Application.start/2`, before any child is started. It reads
+  `Application.get_env(:courier, Courier.Mailer)` — what courier will actually
+  send through — rather than the environment, so it judges the outcome rather than
+  the intent.
+
+  ## Why this is not the same check as `adapter!/1`
+
+  `adapter!/1` runs in `config/runtime.exs` and raises on an unset or silent
+  adapter named in the environment. That is the earlier refusal and on its own it
+  is sufficient. This one catches what that cannot see: an adapter set in a
+  committed `config/*.exs` rather than from the environment, which is exactly
+  what this repository shipped (`adapter: Swoosh.Adapters.Local` in
+  `config/dev.exs` and in `runtime.exs`), and a release built from a tree where
+  somebody has configured the silent adapter directly.
+
+  ## Why it is silent outside `:prod`
+
+  Test configures `Swoosh.Adapters.Test` on purpose — it is the right adapter for
+  a suite, and `assert_email_sent/1` depends on it. A check that fired in every
+  environment would mean the suite could never use it. The refusal is therefore
+  scoped to production, and `MailerAdapterTest` asserts both halves: that `:prod`
+  refuses the silent adapters and that `:test` does not.
+  """
+  @spec verify_boot!(atom()) :: :ok
+  def verify_boot!(env \\ config_env()) do
+    adapter = Application.get_env(:courier, Courier.Mailer, []) |> Keyword.get(:adapter)
+
+    if env == :prod and not deliverable?(adapter) do
+      raise """
+      courier refuses to start: #{describe(adapter: adapter)} cannot deliver mail.
+
+      A courier that cannot send is worse than one that will not start. Running
+      anyway means every send reports a message id, every send writes an outbox
+      row, and every send publishes a `delivered` event — for mail that was never
+      delivered. Downstream consumers of those events believe a person was told
+      something.
+
+      Set the environment and courier will resolve the adapter for you:
+
+          COURIER_MAIL_ADAPTER=smtp
+          COURIER_SMTP_HOST=smtp.your-provider.com
+          COURIER_SMTP_USERNAME=...
+          COURIER_SMTP_PASSWORD=...
+
+      Or set COURIER_MAIL_ADAPTER=none to run with mail rendered into memory and
+      no socket opened — never in production.
+
+      See Courier.MailerAdapter.
+      """
+    end
+
+    :ok
+  end
+
+  @doc """
+  A one-line description of the adapter for a startup log.
+
+  ## The password is not in here and must never be
+
+  This is the function that exists so an operator can confirm which relay courier
+  is pointed at without reading a config file. A username is left out too, and
+  for the same reason: at SMTP a "username" is very often the API key, which is
+  the credential. What is printed is the host, the port, and whether
+  authentication is on — enough to tell two deployments apart, none of which is a
+  secret.
+  """
+  @spec describe(keyword()) :: String.t()
+  def describe(config) do
+    case Keyword.fetch(config, :adapter) do
+      {:ok, Swoosh.Adapters.SMTP} ->
+        "adapter=smtp host=#{Keyword.get(config, :relay, "?")} " <>
+          "port=#{Keyword.get(config, :port, @default_port)} " <>
+          "auth=#{Keyword.get(config, :auth, :always)}"
+
+      {:ok, nil} ->
+        "adapter=none"
+
+      {:ok, adapter} ->
+        "adapter=#{inspect(adapter)}"
+
+      :error ->
+        "adapter=unset"
+    end
+  end
+
+  @doc """
+  The Swoosh adapter configuration for SMTP, read from the environment.
+
+  Private-ish but public so a test can assert on the shape without going through
+  `adapter!/1` and its refusal: `adapter!/1` is the only caller in production and
+  this is what it delegates to.
+
+  Takes no environment argument, and the first draft threaded one through seven
+  private functions that never read it. That is worse than a missing parameter —
+  a parameter that looks like input and is not is a reader's assumption that will
+  be wrong. `adapter!/1` takes one because it genuinely branches on `:prod` (to
+  refuse `none`); this does not, so it does not take one.
+  """
+  @spec smtp_adapter() :: keyword()
+  def smtp_adapter do
+    relay = required!("COURIER_SMTP_HOST")
+    port = port()
+    auth = auth()
+    credentials = credentials(auth)
+
+    [adapter: Swoosh.Adapters.SMTP, relay: relay, port: port, auth: auth] ++
+      credentials ++
+      [tls: tls(), ssl: ssl()]
+  end
+
+  # `auth: :always` needs both halves or `gen_smtp` refuses the options before it
+  # dials anything — `{error, :no_credentials}` from its own validation. Asking
+  # for it and getting a clear message here beats an opaque error at the socket.
+  defp credentials(:never), do: []
+
+  defp credentials(_auth) do
+    [
+      username: required!("COURIER_SMTP_USERNAME"),
+      password: required!("COURIER_SMTP_PASSWORD")
+    ]
+  end
+
+  defp required!(name) do
+    case env_string(name) do
+      nil ->
+        raise """
+        #{name} is missing, and COURIER_MAIL_ADAPTER is smtp.
+
+        courier will not guess a relay or a credential. Without them the adapter
+        has nowhere to connect and cannot authenticate, and a send would fail at
+        the socket rather than at boot — which is the silent-default failure this
+        module exists to end, one layer further out.
+
+        Set #{name} in the deployment's environment.
+        """
+
+      value ->
+        value
+    end
+  end
+
+  # The port is read as a string and converted here rather than by Swoosh, which
+  # would accept `"587"` and `String.to_integer/1` it. Doing the conversion
+  # ourselves means a non-numeric port is a boot failure naming the variable.
+  #
+  # `String.to_integer/1`'s own error is an `ArgumentError` whose message is
+  # "not a textual representation of an integer" — which names neither the
+  # variable nor the value, and reads as a bug in courier rather than as a
+  # typo in a deployment. Wrapped so the refusal is actionable.
+  defp port do
+    case env_string("COURIER_SMTP_PORT") do
+      nil ->
+        @default_port
+
+      value ->
+        case Integer.parse(value) do
+          {port, ""} when port > 0 ->
+            port
+
+          _other ->
+            raise """
+            COURIER_SMTP_PORT=#{inspect(value)} is not a port number.
+
+            courier will not guess. The default is #{@default_port}, and an
+            unparseable value here would otherwise become an adapter error at the
+            socket, once per send, for the life of the deployment.
+            """
+        end
+    end
+  end
+
+  # The enum-shaped options, all with the same rule: a value outside the set is a
+  # boot failure naming both the variable and the choices. Swoosh would accept
+  # these strings and `:string.to_atom/1` them into an atom nobody can grep for,
+  # so a typo would surface as an adapter behaving strangely at the socket rather
+  # than as a message naming `COURIER_SMTP_TLS`.
+  defp auth, do: enum!("COURIER_SMTP_AUTH", [:always, :never, :if_available], :always)
+
+  defp tls, do: enum!("COURIER_SMTP_TLS", [:always, :never, :if_available], :always)
+
+  defp ssl, do: boolean!("COURIER_SMTP_SSL", false)
+
+  defp enum!(name, allowed, default) do
+    case env_string(name) do
+      nil ->
+        default
+
+      value ->
+        # Downcased because `COURIER_SMTP_TLS=Always` is obviously meant and
+        # `TLS=ALWAYS` is a reasonable thing for a shell to have produced.
+        normalised = value |> String.downcase() |> String.trim()
+
+        if normalised in Enum.map(allowed, &to_string/1) do
+          Enum.find(allowed, &(to_string(&1) == normalised))
+        else
+          raise """
+          #{name}=#{inspect(value)} is not one of #{inspect(allowed)}.
+
+          courier will not guess. An unrecognised value here would reach the
+          socket as an atom nothing can grep for, and the send would fail with a
+          message about TLS rather than about configuration.
+          """
+        end
+    end
+  end
+
+  defp boolean!(name, default) do
+    case env_string(name) do
+      nil ->
+        default
+
+      value ->
+        case value |> String.downcase() |> String.trim() do
+          truthy when truthy in ["true", "1", "yes"] -> true
+          falsy when falsy in ["false", "0", "no"] -> false
+          _other -> raise "#{name}=#{inspect(value)} is not true or false."
+        end
+    end
+  end
+
+  defp env_string(name) do
+    # An EMPTY string is treated as unset rather than as a value. `FOO=` in a
+    # compose file or a Dockerfile produces `""`, and an empty host would be
+    # dialed and an empty password would be sent — both worse than the clear
+    # refusal this gives instead.
+    case System.get_env(name) do
+      nil -> nil
+      "" -> nil
+      value -> value
+    end
+  end
+
+  @doc false
+  # `config_env/0` exists so `adapter!/1` has a default that tests can override by
+  # passing an environment. `Mix.env/0` is not the right source: it is not set
+  # inside a RELEASE, and a release that read it would treat itself as `:dev` and
+  # happily configure the Local adapter in production.
+  def config_env do
+    case Application.get_env(:courier, :environment, nil) do
+      nil -> :prod
+      environment -> environment
+    end
+  end
+end

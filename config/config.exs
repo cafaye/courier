@@ -9,7 +9,16 @@ import Config
 
 config :courier,
   ecto_repos: [Courier.Repo],
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime],
+  # The environment name, as data, because `Mix.env/0` is not available inside a
+  # RELEASE and `System.get_env("MIX_ENV")` is not set there either. `config_env/0`
+  # here runs at compile time and the value is baked into the release.
+  #
+  # `Courier.MailerAdapter` reads this rather than guessing: without it the
+  # adapter boot gate would have no way to tell a production boot from a test
+  # one, and its default has to be `:prod` — the safe direction, since guessing
+  # `:dev` would let a release configure the silent adapter.
+  environment: config_env()
 
 # Transactional email.
 #
@@ -31,10 +40,13 @@ config :courier, :mailing,
     team_invitation: "%{invited_by} invited you to join %{account_name}"
   }
 
-# `api_client: false` is the load-bearing line: it stops Swoosh pulling in an
-# HTTP client for provider calls that this packet does not make. When a
-# provider lands, this becomes `Swoosh.ApiClient.Finch` (or Hackney) and the
-# adapter is configured per environment.
+# `api_client: false` is still correct, and now for a real reason rather than
+# because no provider had landed. SMTP is the adapter courier ships, and
+# `Swoosh.Adapters.SMTP` speaks the protocol over `gen_smtp` — it never calls
+# Swoosh's HTTP client, so leaving this false keeps a dependency courier does not
+# use out of the release. It would only need to change for an HTTP-API provider
+# (Postmark, SendGrid, Resend), and none of those is configured: they all have an
+# SMTP front, and one adapter is one fewer credential path to keep out of logs.
 config :swoosh, api_client: false
 
 # Job queue. courier's only queue is the outbox relay (`ProcessOutboxWorker`);

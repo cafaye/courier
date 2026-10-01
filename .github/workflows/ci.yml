@@ -199,17 +199,24 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 772
+          bin/assert-suite "$log" "whole suite (bin/prime)" 822
       #
-      # Measured on the MERGED tree of the observability and error-reporting
-      # packets, from a complete run, and the tiers are the point of recording
-      # it: neither incoming number described this tree. Whole suite 772. The
-      # no-database tier moved 306 -> 351 because the error-reporting tests join
-      # the observability tests there, and the DATABASE TIER DID NOT MOVE at 421
-      # across three packets, because not one of them touches `Courier.Repo` —
-      # which is exactly what that tier is a count of.
+      # Measured on the MERGED tree after the provider-adapter packet, from a
+      # complete run. Whole suite 822. The tiers are the point of recording it,
+      # and one of them is the interesting number: the DATABASE TIER HAS NOW NOT
+      # MOVED ACROSS FOUR PACKETS. It was 421 when the preferences packet landed
+      # and it is 421 now, through the observability packet, the error-reporting
+      # packet and the provider-adapter packet — because not one of those tests
+      # touches `Courier.Repo`, which is exactly what that tier is a count of.
+      # A tier that moved on every merge would be counting commits; a tier that
+      # only moves when its own subject moves is counting what it claims.
+      #
+      # No incoming number described this tree. The error-reporting packet
+      # measured 724 on a branch without the observability tests; the adapter
+      # packet measured 728 on a branch without the error-reporting tests. A
+      # floor is a claim about the tree it lives in, so it is measured there.
 
-      - name: tier — no database (351 tests, 17 files)
+      - name: tier — no database (401 tests, 20 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -240,7 +247,7 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 351
+          bin/assert-suite "$log" "no database" 401
 
       - name: tier — database (421 tests, 21 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
@@ -341,8 +348,8 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 772 passed | \`bin/assert-suite\` |"
-            echo "| no database, 17 files | 351 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 822 passed | \`bin/assert-suite\` |"
+            echo "| no database, 20 files | 401 passed | tier step |"
             echo "| database, 21 files | 421 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"

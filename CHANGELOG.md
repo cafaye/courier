@@ -47,6 +47,54 @@ document lands in both files in one commit, because core asserts the two agree.
     mailbox and opens no socket. The *receiving* half is still exercised, with a
     recording sink standing in for GlitchTip.
 
+||||||| 717cd5d
+- **courier can actually send mail, and it refuses to boot if it cannot.**
+  A buyer installs courier, sets their SMTP credentials, sends a notification, and
+  it arrives. That was not true before: `Swoosh.Adapters.Local` was configured in
+  both dev and prod, and that adapter renders a message into memory and returns a
+  provider-shaped id **without opening a socket**. A released courier accepted
+  every send, wrote an outbox row for each one, published a `delivered` event, and
+  mailed nobody — with no error and no warning anywhere.
+  - **`gen_smtp` is now a declared dependency, and it is the load-bearing half.**
+    `swoosh` declares `gen_smtp` **optional** and `Swoosh.Adapters.SMTP` declares
+    it **required**, so naming `swoosh` alone compiles a courier whose only
+    shipped adapter is the silent one. No amount of configuration could have
+    fixed that state.
+  - **The adapter is read from the environment and has NO default.**
+    `COURIER_MAIL_ADAPTER` is `smtp` — the universal one; SES, Postmark, Mailgun,
+    SendGrid and Resend all speak SMTP or have an SMTP front — plus
+    `COURIER_SMTP_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_AUTH`, `_TLS` and
+    `_SSL`. An unset adapter, or one naming a provider courier does not ship,
+    **stops the boot**, in `config/runtime.exs` and again in
+    `Courier.Application`. The second gate reads the *effective* configuration
+    rather than the environment, so it catches the committed-file route that the
+    first one cannot see.
+  - **`COURIER_MAIL_ADAPTER=none` is refused in production.** It is the
+    Local adapter, and it is the right adapter for a developer working on
+    courier's templates without a relay. It is not the right adapter for a
+    deployment, and being able to reach it by forgetting a variable is the whole
+    problem. A refusal at boot was chosen over a loud warning because a running
+    courier that cannot send is worse than one that will not start: the damage is
+    outbox rows and `delivered` events claiming delivery for mail that never
+    went, and nothing in a dashboard shows it.
+  - **A credential never reaches a log, in any environment.** The startup line
+    names the host, the port and whether auth is on, and deliberately omits the
+    **username** as well as the password — at SMTP a username is usually an API
+    key. Nothing is committed to a config file, and two tests scan `config/*.exs`
+    to keep it that way.
+- **The SMTP adapter is tested against a real provider-shaped server.**
+  `test/courier/smtp_delivery_test.exs` starts a real `:gen_smtp_server` on a
+  kernel-assigned loopback port and drives real sends through
+  `Swoosh.Adapters.SMTP` — real `EHLO`/`MAIL FROM`/`RCPT TO`/`DATA`, real AUTH,
+  real `gen_smtp_client` underneath — and asserts the bytes that arrived. It is
+  not mocked: pointed at `Local` or at `Test` instead, five of its six tests
+  fail, which is the measure of whether the assertion means anything.
+  - The `gen_smtp` server ships with `gen_smtp` itself and runs on `ranch`, so
+    this costs no dependency and no hand-rolled socket that would accept anything.
+  - The suite's floor moves with it: 678 → 728 tests, and the no-database tier
+    306 → 356. The database tier and the SSRF table did not move, because not one
+    of these 50 tests touches `Courier.Repo` and no URL guard was touched.
+
 - **courier emits OpenTelemetry spans, into the collector that ships with kit's
   stack.** `<SERVICE>_OTEL_ENDPOINT` is the only contract (core D16) and it is
   **on by default** — unset, it is `http://otel-collector:4318` — so a developer
