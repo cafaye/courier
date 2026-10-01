@@ -14,19 +14,41 @@
 # prevents from recurring. They are the other half of the public surface, not an
 # afterthought, and they are documented as thoroughly as the webhooks.
 #
-# > DECISION NEEDED (courier-05): the two notification-preferences operations are
-# > served **unauthenticated**, and this document says so with `security: []`
-# > rather than claiming a scheme courier does not enforce. `router.ex` puts them
-# > in the `:api` pipeline only, and the gap is recorded in
-# > `CourierWeb.NotificationPreferencesController`'s moduledoc and pinned by
-# > `test/courier_web/router_test.exs`. Core's conventions ask for required
-# > scopes on every operation, so either courier authenticates them or the
-# > convention needs an exception for per-user settings whose tenant is in the
-# > path. Recommendation: authenticate them in a later packet, before a customer
-# > integrates against this document — a generated client built from `security:
-# > []` will send no token, so closing it later is a breaking change to the
-# > contract. Cost of flipping now: one scope name and the plug in a scope block.
-# > Cost of flipping later: a major `info.version` and every generated client.
+# > **Every operation in this document is authenticated**, including the two
+# > notification-preferences operations, which is not how this file used to read.
+# > They were served with `security: []` and a `> DECISION NEEDED (courier-05)`
+# > above this line recording the gap, on the measured argument that closing it
+# > later would be a major `info.version` and a regenerated SDK for anyone who
+# > had integrated against `security: []`. That argument was right about the cost
+# > and wrong about the deadline, and the cost is paid now: `info.version` is
+# > **2.0.0**, a client generated from the previous document sends no token and
+# > receives a `401`. There is no 2.x client yet, which is the only reason this is
+# > the cheap moment rather than a breaking change to somebody's build.
+#
+# The three answers on those two operations are the same three the webhooks give,
+# because they go through the same plug and are decided in the same context:
+#
+#   * **anonymous → 401**, from `CourierWeb.Plugs.Principal`, whose default
+#     resolver authenticates nobody — so a courier deployed without identity's JWT
+#     verifier locks these routes rather than serving them.
+#   * **another account → 404**, for a user whose stored preferences belong to
+#     somebody else. Not a 403: core's conventions forbid a 403 that leaks the
+#     existence of a resource the caller cannot see.
+#   * **a user nobody has written preferences for → 200**, with the defaults. The
+#     404 above is deliberately narrow — courier holds no foreign key to identity's
+#     users, so with no stored rows it knows nothing about the user, and a 404
+#     would be courier claiming to know something about the requester it does not
+#     know.
+#
+# **A user's preferences belong to an account, and the account is recorded rather
+# than asked for.** `notification_preferences.account_id` is written from the
+# principal, never from a request, and the unique index stays on
+# `(user_id, notification_type)` — a user has one set of preferences, not one per
+# account, so the account is the row's owner rather than part of its identity.
+# The consequence a caller can observe: the **first** authenticated `PUT` for a
+# user id is what records the owning account, because courier cannot ask identity
+# which account a user belongs to. An account that writes for an unwritten user id
+# claims that user and gets no access to anything that existed.
 #
 # ## What courier does not return, and why that is written down here
 #
@@ -36,7 +58,7 @@
 # it, and each is the reason no operation below declares it:
 #
 #   * **403 `forbidden`** — nothing sends it. `CourierWeb.Plugs.Principal`
-#     answers 401 for an anonymous caller and nothing else, and an endpoint in
+#     answers 401 for an anonymous caller and nothing else, and a resource in
 #     another account is a 404, because core forbids a 403 that leaks existence.
 #   * **409 on a duplicate `url`** — a duplicate `url` is a **422** whose
 #     `errors[0].code` is `taken`, which is the status convention's
@@ -128,15 +150,18 @@ info:
   # with the `/v1` prefix. The prefix changes only on a breaking change, and then
   # this number changes in the same commit.
   #
-  # This is a minor bump and nothing more. No path changed, no operation was added
-  # or removed, and no request or response that already existed changed shape.
-  # courier-14 added `Idempotency-Key` to the two mutating POSTs, the two 409s it
-  # can now answer, and the `Idempotency-Replayed` response header — all of which
-  # describe what courier now does, and all of which are additive: a client that
-  # sends no key is unaffected, and one that already read this file is not broken
-  # by learning a 409 was possible. A client that *generates* a retry from the new
-  # header is the case this bump exists for.
-  version: 1.4.0
+  # This is a **major** bump and the first one this document has taken, so the
+  # reason is stated rather than implied by the number. No path changed, no
+  # operation was added or removed, and no response body changed shape — but
+  # `GET` and `PUT /v1/notification_preferences/{user_id}` went from `security:
+  # []` to requiring a bearer token, which is a change to what a client has to
+  # send and therefore a breaking change to the contract rather than an additive
+  # one. A client generated from 1.4.0 sends no token and receives a 401.
+  #
+  # The previous bump (1.3.0 → 1.4.0, courier-14) was a minor one for the
+  # opposite reason: `Idempotency-Key` and the two 409s it can now answer describe
+  # what courier began doing, and a client that sends no key is unaffected.
+  version: 2.0.0
   title: caFaye courier
   description: |
     Transactional email, notification preferences, and outbound webhooks.
@@ -181,19 +206,25 @@ paths:
       tags: [notification preferences]
       operationId: getNotificationPreferences
       summary: What this user has been asked to receive
+      security:
+        - bearerAuth: [notifications:read]
       description: |
         Every notification type courier sends, with this user's stored answers
         filled in and the defaults used where there are none. A `GET` never writes.
 
-        **An unknown user is a 200, not a 404.** identity owns the user table.
+        **An unwritten user is a 200, not a 404.** identity owns the user table.
         courier is asked about a user id and answers with that user's
         preferences, which for a user who has never touched the settings is
         three types, all on. A 404 would be courier claiming to know something
         about the requester it does not know.
 
-        Served without authentication — see this document's header, which records
-        the gap and why it is not quietly written over here.
-      security: []
+        **A user whose preferences belong to another account is a 404**, and
+        that is the one case where the previous sentence does not apply: there is
+        a resource, it is not the caller's, and a 403 would confirm it exists.
+        The 404 appears only once somebody has written preferences for that user
+        id — see this document's header for why the account is recorded rather
+        than asked of identity, and what that means for who owns an unwritten
+        user id.
       responses:
         '200':
           description: Every notification type, with this user's answers
@@ -204,6 +235,8 @@ paths:
                 required: [data]
                 properties:
                   data: { $ref: '#/components/schemas/NotificationPreferences' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotificationPreferencesNotFound' }
         '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '500': { $ref: '#/components/responses/Internal' }
@@ -212,6 +245,8 @@ paths:
       tags: [notification preferences]
       operationId: updateNotificationPreferences
       summary: Apply a batch of preferences
+      security:
+        - bearerAuth: [notifications:write]
       description: |
         Stores a batch and answers with the state the user now has — the same
         shape a `GET` returns, so a settings page does not have to follow a write
@@ -227,8 +262,10 @@ paths:
         `user_id` comes from the path and is never read from the body. A body
         that names a different user cannot write that user's preferences.
 
-        Served without authentication — see this document's header.
-      security: []
+        `account_id` cannot be named by a request at all: it is not a field of a
+        preference entry, so an entry carrying one is a 422 naming
+        `preferences[0].account_id`, and one beside the batch names nothing this
+        operation reads.
       requestBody:
         required: true
         content:
@@ -275,6 +312,8 @@ paths:
                 properties:
                   data: { $ref: '#/components/schemas/NotificationPreferences' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotificationPreferencesNotFound' }
         '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '500': { $ref: '#/components/responses/Internal' }
@@ -869,6 +908,30 @@ components:
             title: Not found
             status: 404
             detail: No webhook endpoint with that id.
+            code: not_found
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
+    NotificationPreferencesNotFound:
+      description: |
+        The preferences for this user id exist and belong to another account.
+
+        Not a 403, for the reason the webhook `NotFound` above gives: a 403 would
+        tell a caller that this user id has preferences at all, which is the only
+        fact this 404 exists to withhold.
+
+        It is deliberately **narrow**. A user nobody has written preferences for is
+        a `200` with the defaults on both operations, because courier holds no
+        foreign key to identity's users and cannot tell an account's user from one
+        that does not exist. This response means "there is something here and it is
+        not yours", and only a stored row can make it true.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/not_found
+            title: Not found
+            status: 404
+            detail: No notification preferences with that user id.
             code: not_found
             trace_id: 0af7651916cd43dd8448eb211c80319c
 

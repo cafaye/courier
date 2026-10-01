@@ -83,8 +83,12 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
   describe "a status the endpoint can return is a status the document declares" do
     test "401 — every operation behind the Principal plug declares it", %{responses: responses} do
       # Proven by asking: an anonymous request to an authenticated operation is
-      # 401, and an anonymous request to the two unauthenticated ones is not. So
-      # the set of operations that must declare 401 is discovered, not written.
+      # 401, and an anonymous request to an operation courier serves unauthenticated
+      # is not. So the set of operations that must declare 401 is discovered, not
+      # written — which is the only reason this half of the check has ever been
+      # able to notice the two notification-preferences operations becoming
+      # authenticated: a list written down on the day would have said they were
+      # exempt and stayed green.
       {must_declare, need_not} =
         responses
         |> Map.keys()
@@ -97,14 +101,19 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
       assert Enum.all?(must_declare, fn op -> Map.has_key?(responses[op], "401") end),
              undeclared(must_declare, "401", responses)
 
-      # And the two operations that are served unauthenticated must not claim 401,
-      # or the document is describing a security control courier does not have.
+      # And an operation courier really does serve unauthenticated must not claim
+      # 401, or the document is describing a security control courier does not
+      # have. That set is currently empty — every operation in this document is
+      # behind `CourierWeb.Plugs.Principal` — and the loop stays because an empty
+      # set is a fact about today, not a fact about the code: the next operation
+      # courier adds without a plug has to fail here rather than be documented
+      # honestly and shipped unauthenticated.
       for operation <- need_not do
         refute Map.has_key?(responses[operation], "401"),
                "#{label(operation)} answers #{provoke(operation, anonymous: true)} to an " <>
                  "anonymous request, and declares a 401. Core's conventions and courier's " <>
-                 "own DECISION NEEDED (courier-05) agree that these two are served " <>
-                 "unauthenticated; declaring 401 would be a document lying about auth."
+                 "router agree that an operation outside the `:authenticated` pipeline is " <>
+                 "served unauthenticated; declaring 401 would be a document lying about auth."
       end
     end
 

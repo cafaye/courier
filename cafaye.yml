@@ -28,13 +28,17 @@
 #     the only omission, they are named in the document's header and in the test's
 #     exclusion list with the reason, and the test fails if that list stops naming
 #     a route the router serves.
-#   - The two `notification_preferences` operations are documented as served
-#     WITHOUT authentication, because that is what the router does. Core's
-#     conventions ask for required scopes on every operation, so this is a
-#     disagreement with the contract and not a settled fact; it is a
-#     `> DECISION NEEDED (courier-05)` in `openapi.yaml`'s header, and closing it
-#     after a customer has generated a client is a major `info.version` bump and a
-#     regenerated SDK. Authenticate them before anyone integrates.
+#   - Every operation in `openapi.yaml` requires authentication, and the two
+#     `notification_preferences` operations used to be documented as served
+#     WITHOUT it — because that is what the router did, which was a
+#     disagreement with core's conventions rather than a settled fact. It is
+#     closed: both are behind `CourierWeb.Plugs.Principal` and behind
+#     `notification_preferences.account_id` for tenancy, `openapi.yaml` is
+#     `2.0.0`, and no operation declares `security: []`. The cost the old note
+#     warned about was paid here rather than later: a client generated from
+#     `1.4.0` sends no token and receives a 401, which is a major `info.version`
+#     and a regenerated SDK. There was no 2.x client to regenerate, which is the
+#     only reason this was the cheap moment rather than somebody's build break.
 #   - `consumes` is empty. courier is not subscribed to anything yet; when it
 #     starts reacting to identity or billing events this is the list, and every
 #     entry has to come with an idempotent consumer, because delivery is

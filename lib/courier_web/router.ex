@@ -14,9 +14,11 @@ defmodule CourierWeb.Router do
   end
 
   # `Idempotency-Key`, on the mutating POSTs and nothing else. Core requires it on
-  # a POST that can be retried safely, which is these two and not the other four
-  # actions: `GET` and `DELETE` are idempotent by HTTP's definition, and `PATCH`
-  # here is a partial update whose repeat is already the same row.
+  # a POST that can be retried safely, which is these two and not the other six
+  # actions: `GET` and `DELETE` are idempotent by HTTP's definition, `PATCH` here
+  # is a partial update whose repeat is already the same row, and `PUT` on
+  # notification preferences stores the state it is given rather than accumulating
+  # deltas.
   #
   # After `:authenticated` on purpose — the key is scoped to the principal, so it
   # cannot be claimed before courier knows who is asking.
@@ -34,26 +36,28 @@ defmodule CourierWeb.Router do
     get "/readyz", HealthController, :readyz
   end
 
-  # The platform's API, under the version prefix core's conventions require.
-  # Notification preferences are the first thing courier is asked about over
-  # HTTP; authentication is a later packet, and the absence of it is in the
-  # controller's moduledoc rather than hidden here.
+  # Everything a caller must be an authenticated caller for.
+  #
+  # Webhook endpoints were the first of these, because an endpoint's url and
+  # signing secret are a way to make courier send signed requests and a list
+  # endpoint with no authentication is a way to enumerate them. Notification
+  # preferences joined them for the same reason at a smaller scale: a `user_id` in
+  # a path is a string anybody can write, so a surface that reads and writes by
+  # one is a surface where any caller can read and overwrite any other tenant's
+  # answers by guessing an id.
+  #
+  # Both live in one scope because there is nothing left to distinguish them: the
+  # refusal is the same plug's refusal and the same `401`, and a caller that has
+  # to handle two kinds of 401 is a caller that will handle one of them wrongly.
+  #
+  # `CourierWeb.Plugs.Principal`, whose default resolver authenticates nobody —
+  # so a courier deployed without identity's JWT verifier locks these rather than
+  # serving them.
   scope "/v1", CourierWeb do
-    pipe_through :api
+    pipe_through [:api, :authenticated]
 
     get "/notification_preferences/:user_id", NotificationPreferencesController, :show
     put "/notification_preferences/:user_id", NotificationPreferencesController, :update
-  end
-
-  # Webhook endpoints are the first courier resource that cannot be served
-  # unauthenticated: an endpoint's url and signing secret are a way to make
-  # courier send signed requests, so the whole scope goes through
-  # `CourierWeb.Plugs.Principal`, whose default resolver authenticates nobody.
-  # Notification preferences above are deliberately *not* in this scope — changing
-  # their authorization is not this packet's business, and the gap is recorded in
-  # that controller's moduledoc.
-  scope "/v1", CourierWeb do
-    pipe_through [:api, :authenticated]
 
     get "/webhook_endpoints", WebhookEndpointsController, :index
     get "/webhook_endpoints/:id", WebhookEndpointsController, :show
@@ -62,10 +66,14 @@ defmodule CourierWeb.Router do
   end
 
   # The same resource, on the two POSTs. A separate scope rather than one
-  # pipeline over all six, because the header is for a POST that can be retried
-  # and putting it on the other four would claim an idempotency courier does not
-  # provide — `test/courier_web/router_test.exs` asserts `:authenticated` on
-  # every action, and this keeps that true while adding the second pipeline.
+  # pipeline over all eight, because the header is for a POST that can be retried
+  # and putting it on the other six would claim an idempotency courier does not
+  # provide — `GET` and `DELETE` are idempotent by HTTP's definition, `PATCH`
+  # here is a partial update whose repeat is already the same row, and `PUT` is
+  # idempotent by construction because it stores the state it is given rather than
+  # accumulating deltas. `test/courier_web/router_test.exs` asserts
+  # `:authenticated` on every action, and this keeps that true while adding the
+  # second pipeline.
   scope "/v1", CourierWeb do
     pipe_through [:api, :authenticated, :idempotent]
 

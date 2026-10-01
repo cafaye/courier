@@ -23,7 +23,7 @@
 # `worker/courier-12-contract` after adding the error-response checks:
 #
 #   * the gate is `mise run prime`, which runs `./bin/prime`;
-#   * the suite prints exactly one `Result:` line, `Result: 616 passed`;
+#   * the suite prints exactly one `Result:` line, `Result: 630 passed`;
 #   * a warm gate takes ~37s; a cold one (deps + compile) is minutes;
 #   * `./bin/prime` on its own does NOT work without mise on PATH — line 14 is
 #     `mix local.hex --force` and it exits 127 with "mix: command not found".
@@ -82,23 +82,25 @@ gate:
       # that finding, which is the check working on the declaration that
       # declares the checks.
       match: '^Result: ([0-9]+) passed(?: \([^)]*\))?$'
-      # 616 is what the suite reports today, measured, not copied from core's
-      # 163 or from courier's own CI floor. This is a DECREASE-DETECTOR:
-      # `minimum` is read from the LAST match, so a run that printed 616 and
-      # then 500 would be caught, and a suite that quietly lost 116 tests cannot
-      # report itself as passing.
+      # 630 is what the suite reports today, measured, not copied from core's 163
+      # or from courier's own CI floor. This is a DECREASE-DETECTOR: `minimum` is
+      # read from the LAST match, so a run that printed 630 and then 500 would be
+      # caught, and a suite that quietly lost 130 tests cannot report itself as
+      # passing.
       #
-      # The margin below the measured 616 is deliberate and small. courier is a
+      # The margin below the measured 630 is deliberate and small. courier is a
       # growing repository and this floor is a ratchet that is meant to be
       # raised as the suite grows, not a target the suite must hit.
       #
-      # The previous value here was 560 against a measured 564, raised by
-      # courier-14 in the same commit that added the 52 `Idempotency-Key` tests —
-      # which is the rule this floor exists to enforce, and breaking it is how a
-      # repository discovers its gate was measuring nothing. The `whole suite`,
-      # `no database` and `database` floors in CI moved with it: 616, 258 and 358,
-      # measured the same way and in the same run.
-      minimum: 610
+      # The previous value here was 610 against a measured 616, raised by
+      # courier-16 in the same commit that closed the notification-preferences
+      # authentication gap and added its 14 tests — which is the rule this floor
+      # exists to enforce. The two value before it was 560 against a measured 564,
+      # raised by courier-14 in the same commit that added the 52
+      # `Idempotency-Key` tests. The `whole suite`, `no database` and `database`
+      # floors in CI moved with it: 630, 258 and 372, measured the same way and in
+      # the same run.
+      minimum: 624
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres

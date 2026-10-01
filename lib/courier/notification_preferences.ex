@@ -3,15 +3,22 @@ defmodule Courier.NotificationPreferences do
   What a user has been asked to receive, per notification type.
 
   This is courier's one piece of per-user state, and the only thing standing
-  between a user and mail they asked not to receive. Two rules make it safe to
+  between a user and mail they asked not to receive. Three rules make it safe to
   read:
 
     * **Silence is not consent.** A user courier has never seen, or a type a user
       has never mentioned, is on. courier does not own users, so "no row" is the
-      normal case, not an error — `list/1` returns every type, on, for an id it
+      normal case, not an error — `list/2` returns every type, on, for an id it
       has never been asked about.
     * **One type off is not every type off.** Preferences are per type and per
       channel, and `enabled?/3` reads exactly the one it was asked about.
+    * **A preference is the user's, and it belongs to an account.** `list/2` and
+      `update/3` take the calling account and answer `{:error, :not_found}` for a
+      user whose rows belong to somebody else, which is the whole of the
+      authorization on the two routes that call them. The 404 is deliberately
+      narrow: it appears only once rows exist, because until then courier has
+      nothing to say about the user at all and inventing a "belongs to another
+      account" out of an empty table would be a 404 that leaks the emptiness.
 
   `push` is stored and returned because the API is the user's settings and a
   half-answer is worse than none, but it is not a delivery decision courier can
@@ -20,6 +27,36 @@ defmodule Courier.NotificationPreferences do
   A rejected batch writes nothing. The entries are validated together before any
   of them is stored, so a typo in the third entry cannot leave the first two
   applied and the user looking at a half-saved settings page.
+
+  ## The first write claims the user, and that is a real limitation
+
+  courier cannot ask identity which account a user belongs to: `user_id` is a
+  uuid with no foreign key here and there is no client to ask with. So the
+  account is recorded by whoever writes first, and it is the account the rows
+  belong to from then on.
+
+  That is a bounded weakness rather than a good design, and it is worth stating
+  in full. An account that writes preferences for a user id nobody has written
+  for can **claim** that user: it gains no access to anything that existed, and
+  the account that actually owns the user then gets a 404 and a settings page
+  that cannot save. So the rule is "the first authenticated `PUT` wins", not
+  "the right `PUT` wins", and the second is the one the platform wants.
+
+  It is still the right rule for courier today, because the alternative is not a
+  better answer but no answer: a service that cannot resolve ownership can
+  either let the first writer claim the resource, or refuse every write forever.
+  When identity's membership question is reachable on the hot path, this is the
+  comparison to add — and it is a comparison, not a new source of truth, because
+  the column is already where the claim is recorded.
+
+  ## Why `enabled?/3` takes no account
+
+  It is the delivery path, and delivery is addressed by a user: `Courier.Deliver`
+  is handed a payload with a `user_id` and no account, and a user id is a global
+  uuid from identity. There is also exactly one row per `(user, type)` — the
+  account is the row's owner, not part of its identity — so there is nothing for
+  an account to disambiguate. Threading one through would have meant inventing an
+  account for a payload that does not carry one.
   """
 
   import Ecto.Query
@@ -33,38 +70,50 @@ defmodule Courier.NotificationPreferences do
   Every notification type courier sends, in order, with the user's stored
   answers filled in and the defaults used where there are none.
 
+  `{:ok, preferences}`, or `{:error, :not_found}` when this user has preferences
+  and they belong to another account.
+
   Never writes: a GET is not a change.
   """
-  @spec list(String.t()) :: [NotificationPreference.t()]
-  def list(user_id) do
-    stored =
-      NotificationPreference
-      |> where([preference], preference.user_id == ^user_id)
-      |> Repo.all()
-      |> Map.new(&{&1.notification_type, &1})
-
-    Enum.map(types(), &Map.get_lazy(stored, &1, fn -> default(user_id, &1) end))
+  @spec list(Ecto.UUID.t(), String.t()) ::
+          {:ok, [NotificationPreference.t()]} | {:error, :not_found}
+  def list(account_id, user_id) do
+    with :ok <- addressable(account_id, user_id) do
+      # `stored/1` is `%{}` for a user nobody has written for, and `answers/3`
+      # turns a missing type into a default — so the empty case is the same code
+      # path as the full one rather than a branch beside it.
+      {:ok, answers(account_id, user_id, stored(user_id))}
+    end
   end
 
   @doc """
-  Applies a batch of preferences for one user.
+  Applies a batch of preferences for one user, on behalf of one account.
 
   `params` is the request body: `%{"preferences" => [%{"notification_type" =>
   ..., "email_enabled" => ...}, ...]}`.
 
-  Returns `{:ok, preferences}` — the same shape as `list/1`, so a caller can
-  answer a `PUT` with the state the user now has — or `{:error, changeset}`,
-  where the errors name the field that failed and, through
+  Returns `{:ok, preferences}` — the same shape as `list/2`, so a caller can
+  answer a `PUT` with the state the user now has — `{:error, :not_found}` when
+  the user belongs to another account, or `{:error, changeset}`, where the errors
+  name the field that failed and, through
   `CourierWeb.NotificationPreferencesController`, the entry of the batch it was
   in. A rejected batch stores nothing.
+
+  The tenancy check is **first**, before the batch is looked at, which is the
+  order `Courier.WebhookEndpoints` uses and the only safe one: a 422 about a
+  caller's own body leaks nothing, but answering it for a user the caller cannot
+  see would confirm that the user has preferences before the 404 gets a chance to
+  withhold it.
   """
-  @spec update(String.t(), map()) ::
-          {:ok, [NotificationPreference.t()]} | {:error, Ecto.Changeset.t()}
-  def update(user_id, params) do
-    with {:ok, entries} <- entries(params),
+  @spec update(Ecto.UUID.t(), String.t(), map()) ::
+          {:ok, [NotificationPreference.t()]}
+          | {:error, Ecto.Changeset.t() | :not_found}
+  def update(account_id, user_id, params) do
+    with :ok <- addressable(account_id, user_id),
+         {:ok, entries} <- entries(params),
          {:ok, changesets} <- validate_all(entries) do
-      store_all(user_id, changesets)
-      {:ok, list(user_id)}
+      store_all(account_id, user_id, changesets)
+      {:ok, answers(account_id, user_id, stored(user_id))}
     end
   end
 
@@ -73,10 +122,12 @@ defmodule Courier.NotificationPreferences do
 
   `false` for a type courier does not send: courier has no preference to honour
   and nothing to send, so the honest answer is that it is not enabled.
+
+  No account, on purpose — see the moduledoc.
   """
   @spec enabled?(String.t() | nil, String.t(), :email | :push) :: boolean()
   def enabled?(user_id, notification_type, :email) do
-    notification_type in types() and stored(user_id, notification_type, :email_enabled)
+    notification_type in types() and stored_preference(user_id, notification_type, :email_enabled)
   end
 
   def enabled?(_user_id, _notification_type, _channel), do: false
@@ -87,6 +138,42 @@ defmodule Courier.NotificationPreferences do
   """
   @spec types() :: [String.t()]
   def types, do: Courier.Mailers.types()
+
+  # The one question both entry points ask before anything else: is this user
+  # addressable by this account? A user nobody has written anything for is
+  # addressable by anybody — courier does not own users, so it cannot tell that
+  # user from one that does not exist, and refusing here would make a settings
+  # page 404 for a user who has simply never changed a setting.
+  defp addressable(account_id, user_id) do
+    case owner(user_id) do
+      nil -> :ok
+      ^account_id -> :ok
+      _another_accounts -> {:error, :not_found}
+    end
+  end
+
+  # The account entitled to this user's preferences, or `nil` when there is
+  # nothing stored. One row is enough: the account is the owner and every row for
+  # a user carries the same one, which is why the unique index is on
+  # `(user_id, notification_type)` alone.
+  defp owner(user_id) do
+    NotificationPreference
+    |> where([preference], preference.user_id == ^user_id)
+    |> select([preference], preference.account_id)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  defp stored(user_id) do
+    NotificationPreference
+    |> where([preference], preference.user_id == ^user_id)
+    |> Repo.all()
+    |> Map.new(&{&1.notification_type, &1})
+  end
+
+  defp answers(account_id, user_id, stored) do
+    Enum.map(types(), &Map.get_lazy(stored, &1, fn -> default(account_id, user_id, &1) end))
+  end
 
   # An empty list is a request that says nothing about anything, and answering it
   # with the user's current state would read as "here is what you just set". A
@@ -136,7 +223,8 @@ defmodule Courier.NotificationPreferences do
   end
 
   # An unknown key in an entry is a typo in a channel courier does not have
-  # (`emai_enabled`) or a field it has not grown yet. Silently dropping it would
+  # (`emai_enabled`) or a field it has not grown yet — including `account_id`,
+  # which is courier's and not a caller's to name. Silently dropping it would
   # leave the user believing a setting was saved that was not, so it is an error
   # on the key itself.
   #
@@ -183,13 +271,19 @@ defmodule Courier.NotificationPreferences do
   # Only the channels the entry actually names are written. An entry that says
   # "welcome is off" and says nothing about push must not turn push back on, and
   # an entry that names no channel at all is a no-op rather than a write.
-  defp store_all(user_id, changesets) do
+  #
+  # `account_id` rides on every insert because the caller is already the owner by
+  # the time this runs — `update/3` asked — and putting it on the row is what
+  # makes the *next* `list/2` able to answer for this account rather than for
+  # anybody who names the user.
+  defp store_all(account_id, user_id, changesets) do
     Enum.each(changesets, fn changeset ->
       replace = Enum.filter(@channels, &Map.has_key?(changeset.params, to_string(&1)))
 
       %NotificationPreference{}
       |> NotificationPreference.changeset(changeset.params)
       |> Ecto.Changeset.put_change(:user_id, user_id)
+      |> Ecto.Changeset.put_change(:account_id, account_id)
       |> Repo.insert(
         on_conflict: conflict(replace),
         conflict_target: [:user_id, :notification_type]
@@ -200,7 +294,7 @@ defmodule Courier.NotificationPreferences do
   defp conflict([]), do: :nothing
   defp conflict(replace), do: {:replace, replace}
 
-  defp stored(user_id, notification_type, field) do
+  defp stored_preference(user_id, notification_type, field) do
     case Repo.get_by(NotificationPreference,
            user_id: user_id,
            notification_type: notification_type
@@ -210,8 +304,9 @@ defmodule Courier.NotificationPreferences do
     end
   end
 
-  defp default(user_id, notification_type) do
+  defp default(account_id, user_id, notification_type) do
     %NotificationPreference{
+      account_id: account_id,
       user_id: user_id,
       notification_type: notification_type,
       email_enabled: true,

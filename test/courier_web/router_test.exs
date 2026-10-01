@@ -65,12 +65,20 @@ defmodule CourierWeb.RouterTest do
       end
     end
 
-    test "notification preferences are NOT behind it, because that gap is recorded elsewhere" do
-      # Their controller's moduledoc says its requests are unauthenticated in this
-      # packet. Moving them is not this packet's business, and quietly putting them
-      # behind a plug would change an API without saying so.
-      assert %{pipe_through: [:api]} =
-               Phoenix.Router.route_info(Router, "GET", "/v1/notification_preferences/abc", "")
+    test "notification preferences are behind it too, on both verbs" do
+      # The same claim about the same pipeline, asserted over the resource that
+      # used to be the exception. It lives beside the webhook assertion rather
+      # than in a describe of its own because there is nothing left to say about
+      # it that is not said there: a route courier does not authenticate is a
+      # route that serves whoever asks, and the two surfaces now differ only in
+      # what they hold.
+      for verb <- ~w(GET PUT) do
+        assert %{pipe_through: pipelines} =
+                 Phoenix.Router.route_info(Router, verb, "/v1/notification_preferences/abc", "")
+
+        assert :authenticated in pipelines,
+               "#{verb} notification preferences must be authenticated"
+      end
     end
 
     test "no action answers a method it does not declare" do

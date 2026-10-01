@@ -96,6 +96,94 @@ document lands in both files in one commit, because core asserts the two agree.
   keeps the assertion exactly as strong (all three types present, each once,
   nothing else) and stops it testing the server's whim.
 
+### Security
+
+- **`GET` and `PUT /v1/notification_preferences/{user_id}` are authenticated, and
+  tenant-scoped.** Both were reachable with no credential at all, which meant any
+  caller could read or overwrite any other tenant's notification preferences by
+  guessing or enumerating a `user_id`. This closes the gap the `0.1.0` Security
+  section below recorded, on the deadline that section asked for ("before a
+  customer generates a client from this document").
+  - **Behind courier's own pipeline.** The two routes moved into the same
+    `:api, :authenticated` scope as the webhooks, so an anonymous caller is a
+    `401` from `CourierWeb.Plugs.Principal` — the same refusal, body for body, as
+    every other authenticated route. No second mechanism, no new plug.
+  - **Tenancy is recorded, not asked for.** `notification_preferences` gains a
+    NOT NULL `account_id`, written from `conn.assigns.current_account` and never
+    from a request. `Courier.NotificationPreferences.list/2` and `update/3` take
+    the account as their first argument and answer `{:error, :not_found}` for a
+    user whose rows belong to somebody else.
+  - **A cross-tenant answer is a 404, never a 403**, because core's conventions
+    forbid a 403 that leaks the existence of a resource the caller cannot see.
+    And the 404 is **narrow**: a user nobody has written preferences for is still
+    a `200` with the defaults, since courier holds no foreign key to identity's
+    users and cannot tell that user from one that does not exist.
+  - **`account_id` cannot be named by a caller.** It is not a field of a
+    preference entry, so an entry carrying one is a 422 naming
+    `preferences[0].account_id`, rather than being silently dropped.
+  - **The unique index stays on `(user_id, notification_type)`.** A user has one
+    set of preferences, not one per account, so the account is the row's owner
+    and not part of its identity. That is also what keeps
+    `NotificationPreferences.enabled?/3` — the delivery path, which is addressed by
+    a user and has no account in it — reading by user alone and unambiguous.
+  - **What this does *not* fix, stated rather than glossed:** courier cannot ask
+    identity which account a user belongs to, so the **first authenticated `PUT`
+    for a user id is what claims it**. An account that writes for a user id
+    nobody has written for gains the claim — no access to anything that existed,
+    and the account that actually owns the user then gets a 404 and a settings
+    page that cannot save. The alternative was no writes at all.
+  - **The migration deletes the rows it cannot attribute.** Every row that existed
+    was written through an unauthenticated route, so there is no honest account to
+    give it. Backfilling a placeholder would put every user's opt-outs under an
+    account nobody owns — one missing predicate away from being readable by every
+    tenant — and a nullable column invites the next query that forgets to filter
+    on it. The loss falls in courier's own safe direction: a removed preference
+    reads as *no preference*, which reads as **on**, so a user courier forgets is a
+    user courier mails, never a user's mail going to somebody else. There are no
+    customers yet to have an opt-out to lose.
+
+### Changed
+
+- **`openapi.yaml` is 1.4.0 → 2.0.0, a major bump and this document's first.**
+  No path changed, no operation was added or removed, and no response body
+  changed shape — but the two notification-preferences operations went from
+  `security: []` to requiring a bearer token, which changes what a client has to
+  send and is therefore breaking rather than additive. A client generated from
+  1.4.0 sends no token and receives a 401. The previous header's own arithmetic
+  called this move ("a major `info.version` and every generated client"); it was
+  paid here because no 2.x client exists yet.
+- **Every operation in `openapi.yaml` now declares a `401` and a scope.**
+  `notifications:read` and `notifications:write` on the two preferences
+  operations, matching the `webhooks:read` / `webhooks:write` naming. The two
+  operations also declare the `404` they can now answer, through a
+  `NotificationPreferencesNotFound` component of their own rather than reusing the
+  webhook one, because its `detail` is a different sentence.
+- **`Courier.NotificationPreferences.list/1` is `list/2` and `update/2` is
+  `update/3`**, with the account as the first argument. `enabled?/3` is unchanged
+  and takes no account — see above.
+
+### Tests
+
+Fourteen more, all written before the code they cover:
+
+- **The authorization matrix on both preferences verbs** — anonymous is a `401`
+  on each, the request is halted in the plug (`conn.assigns[:action]` is nil), and
+  another account gets a `404` on the read and on the write. The write half reads
+  the row back as its owner afterwards, because a refusal that still stored the
+  batch would be a 404 and a breach.
+- **"The same refusal the authenticated routes already return" is asserted by
+  comparison, not by a copy.** An anonymous request to each preferences route and
+  to `GET /v1/webhook_endpoints` is decoded, `instance` and `trace_id` are dropped,
+  and the two bodies are asserted equal. A hand-written expectation for the
+  envelope would pass against a plug that answered 401 for the wrong reason.
+- **The first-writer-claims rule is a test in both directions** — an account that
+  owns a user may keep writing, and an account that does not is refused even after
+  the owner has written three times.
+- **`router_test.exs`'s assertion flipped with the router.** It previously asserted
+  that these two routes were *not* behind the authenticated pipeline, with a
+  comment explaining why the gap was deliberate; it now asserts that both verbs
+  are, which is the same claim about the same pipeline.
+
 
 courier can send a transactional mail, honour what the user asked not to receive,
 record every send as an event that its own relay publishes, and deliver those

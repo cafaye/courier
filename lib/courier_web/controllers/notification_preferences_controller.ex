@@ -3,8 +3,8 @@ defmodule CourierWeb.NotificationPreferencesController do
   The JSON API over notification preferences:
   `GET` and `PUT /v1/notification_preferences/:user_id`.
 
-  Two things are worth saying about the semantics, because both look like
-  omissions and are not:
+  Three things are worth saying about the semantics, because each looks like an
+  omission and is not:
 
     * **An unknown user is a 200, not a 404.** identity owns the user table.
       courier is asked about a user id and answers with that user's preferences,
@@ -15,14 +15,36 @@ defmodule CourierWeb.NotificationPreferencesController do
       is the one thing courier can check about the request without consulting
       anybody, and there is no point validating a body for a user courier cannot
       address.
+    * **A user whose preferences belong to another account *is* a 404.** That is
+      the one exception to the first of those, and it is an exception about what
+      courier knows rather than about who is asking: with no stored rows courier
+      knows nothing about the user, so there is nothing to withhold; with rows
+      there is a resource, it belongs to somebody else, and core's conventions
+      forbid the 403 that would otherwise confirm it exists.
 
   Every error is core's problem+json (`CourierWeb.Problem`), with the field named
   as the *request* named it — `preferences[0].notification_type` — because the
   body is what the caller can fix.
 
-  These requests are not authenticated in this packet: there is no JWT
-  verification here yet, so what the tests cover is shape and semantics, not who
-  is allowed to ask.
+  ## Authorization
+
+  Both actions read the account from `conn.assigns.current_account`, which
+  `CourierWeb.Plugs.Principal` put there, and pass it to
+  `Courier.NotificationPreferences` as the first argument.
+
+  An `account_id` in a request cannot reach the row. It is not a field of a
+  preference entry at all, so an entry carrying one is refused as the unknown
+  key it is — the same answer as `emai_enabled`, and a stronger one than
+  `user_id` gets, because `user_id` is a real field that the path overwrites. A
+  `account_id` beside the batch, at the top level of the body, names nothing
+  courier reads: the body's only key is `preferences`.
+
+  Neither action reads the account from anywhere else, and neither has to check
+  whether the caller may read the user: the context answers `{:error, :not_found}`
+  and this module turns that into a 404. The check living in the context rather
+  than here is deliberate — the same question is asked by `list/2` and
+  `update/3`, and a controller that asked it a third way would be a third place
+  for it to be wrong.
   """
 
   use CourierWeb, :controller
@@ -34,9 +56,13 @@ defmodule CourierWeb.NotificationPreferencesController do
   Every notification type courier sends, with this user's stored answers.
   """
   def show(conn, %{"user_id" => user_id}) do
-    case cast_user_id(user_id) do
-      {:ok, user_id} -> json(conn, preferences(user_id, NotificationPreferences.list(user_id)))
+    with {:ok, user_id} <- cast_user_id(user_id),
+         {:ok, preferences} <-
+           NotificationPreferences.list(conn.assigns.current_account, user_id) do
+      json(conn, answer(user_id, preferences))
+    else
       :error -> invalid_user_id(conn)
+      {:error, :not_found} -> not_found(conn)
     end
   end
 
@@ -44,23 +70,30 @@ defmodule CourierWeb.NotificationPreferencesController do
   Applies a batch of preferences and answers with the state the user now has.
   """
   def update(conn, %{"user_id" => user_id} = params) do
-    case cast_user_id(user_id) do
-      {:ok, user_id} -> store(conn, user_id, params)
+    with {:ok, user_id} <- cast_user_id(user_id),
+         {:ok, stored} <-
+           NotificationPreferences.update(conn.assigns.current_account, user_id, params) do
+      json(conn, answer(user_id, stored))
+    else
       :error -> invalid_user_id(conn)
+      {:error, :not_found} -> not_found(conn)
+      {:error, changeset} -> validation_failed(conn, changeset)
     end
   end
 
-  defp store(conn, user_id, params) do
-    case NotificationPreferences.update(user_id, params) do
-      {:ok, stored} ->
-        json(conn, preferences(user_id, stored))
-
-      {:error, changeset} ->
-        Problem.send(conn, 422, :validation_failed, detail(changeset), failed(changeset))
-    end
+  defp validation_failed(conn, changeset) do
+    Problem.send(conn, 422, :validation_failed, detail(changeset), failed(changeset))
   end
 
-  defp preferences(user_id, preferences) do
+  # The user's preferences exist and belong to another account, which is the same
+  # answer a webhook endpoint in another account gets and for the same reason: a
+  # 403 would tell a caller that this user id has preferences at all, which is
+  # the only fact the 404 exists to withhold.
+  defp not_found(conn) do
+    Problem.send(conn, 404, :not_found, "No notification preferences with that user id.")
+  end
+
+  defp answer(user_id, preferences) do
     %{
       data: %{
         user_id: user_id,
@@ -71,7 +104,9 @@ defmodule CourierWeb.NotificationPreferencesController do
 
   # The three fields the API promises. `user_id` is in the path and answered at
   # the top of the body, and `id` is courier's row id, which the caller has no
-  # use for.
+  # use for. `account_id` is courier's tenancy key rather than the caller's to
+  # read, so it is not in the body — a caller that already holds the account
+  # knows it.
   defp preference(preference) do
     %{
       notification_type: preference.notification_type,

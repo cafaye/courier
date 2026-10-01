@@ -22,6 +22,11 @@ defmodule Courier.DeliverTest do
   @user_id "6f5d4c3b-2a19-4e8f-9c07-1b2d3e4f5061"
   @other_user_id "7a6e5d4c-3b20-4f90-8d18-2c3e4f506172"
 
+  # A tenancy key, not a credential and not a secret: the account a stored
+  # preference belongs to. The delivery payload carries no account, and that is
+  # what this block exists to show is fine.
+  @account_id "1a2b3c4d-5e6f-4a8b-9c0d-1e2f3a4b5c6d"
+
   defp payload(overrides \\ %{}) do
     Map.merge(
       %{
@@ -152,8 +157,13 @@ defmodule Courier.DeliverTest do
 
   describe "preferences" do
     setup do
+      # An account, because a preference now records the account entitled to it.
+      # Which account it is does not matter here and that is the point being
+      # asserted four times over: `Courier.Deliver` reads `enabled?/3`, which
+      # takes a user and no account, so the delivery path is unaffected by which
+      # tenant the answer was stored under.
       {:ok, _} =
-        NotificationPreferences.update(@user_id, %{
+        NotificationPreferences.update(@account_id, @user_id, %{
           "preferences" => [%{"notification_type" => "welcome", "email_enabled" => false}]
         })
 

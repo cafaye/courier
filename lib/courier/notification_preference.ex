@@ -7,8 +7,16 @@ defmodule Courier.NotificationPreference do
   users, and a preference for a user it has never seen is its normal case
   (there is no `users` table here to point at).
 
+  `account_id` is **who is entitled to this answer**, not part of what the answer
+  is. A user has one set of preferences whatever route they were written through,
+  so the row is still keyed by `(user_id, notification_type)`; the account is what
+  `Courier.NotificationPreferences.list/2` and `update/3` compare a caller against
+  before answering, and it comes from the principal. Without it the two routes
+  were reachable by anybody who could type a `user_id` into a path — the whole
+  reason this column exists.
+
   The absence of a row is also an answer: every channel is on unless the user
-  turned it off. `Courier.NotificationPreferences.list/1` is what turns that
+  turned it off. `Courier.NotificationPreferences.list/2` is what turns that
   default into rows, and it does not write them — a GET must not have a side
   effect.
   """
@@ -19,6 +27,12 @@ defmodule Courier.NotificationPreference do
 
   alias Courier.Mailers
 
+  # Deliberately **not** `account_id`. These are the fields a request's entry may
+  # name, and one a caller must not: it is set from `conn.assigns.current_account`
+  # and never cast, so a body carrying `account_id` is rejected as the unknown key
+  # it is rather than silently discarded. That is a stronger answer than the one
+  # `user_id` gets — which *is* an entry field, deliberately, so an entry that
+  # names its own user is accepted and then overwritten from the path.
   @fields ~w(user_id notification_type email_enabled push_enabled)a
 
   @type t :: %__MODULE__{}
@@ -27,6 +41,7 @@ defmodule Courier.NotificationPreference do
   def fields, do: @fields
 
   schema "notification_preferences" do
+    field :account_id, Ecto.UUID
     field :user_id, Ecto.UUID
     field :notification_type, :string
     field :email_enabled, :boolean, default: true
@@ -40,7 +55,8 @@ defmodule Courier.NotificationPreference do
 
   `user_id` is set here rather than cast: it comes from the path, not the body,
   and a body that names a different user must not be able to write that user's
-  preferences.
+  preferences. `account_id` is not a field of an entry at all — see `@fields` —
+  so there is nothing here for a body to reach.
   """
   def changeset(preference, attrs) do
     cast(preference, attrs, @fields -- [:user_id])

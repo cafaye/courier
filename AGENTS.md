@@ -213,10 +213,38 @@ under-read, because a document reader that finds nothing and a router reader tha
 finds nothing agree with each other, and a green check over nothing is worse than
 no check. **A route added to `router.ex` is not finished until it is in
 `openapi.yaml`, and an operation added to `openapi.yaml` is not finished until
-the router serves it.** A `> DECISION NEEDED (courier-05)` is open in the
-document's header: the two `notification_preferences` operations are served
-unauthenticated, and documenting them that way is a fact about the code, not an
-endorsement of it.
+the router serves it.** The only omission is `/healthz` and `/readyz`, named in
+the document's header and in the test's exclusion list with the reason, and the
+test fails if that list stops naming a route the router serves.
+
+Every operation in that document requires a bearer token, including the two
+notification-preferences operations, which stopped being the exception in
+courier-16. `openapi_error_responses_test.exs` works out which operations must
+declare a 401 by **provoking** them rather than from a list, so it is the check
+that noticed; a `security:` key or a status written down in the test would each
+have kept asserting the old thing and gone green.
+
+**A preference is the user's, and the account is who owns it.**
+`notification_preferences.account_id` is written from the principal and never from
+a request, and the unique index stays on `(user_id, notification_type)` — one
+answer per person, not one per account, which is what lets `enabled?/3` (the
+delivery path, and it takes no account) keep reading by user alone. Two
+consequences are load-bearing and both are asserted:
+
+  * **A 404 is the only cross-tenant answer, and it is narrow.** A user nobody
+    has written preferences for is a 200 with the defaults, because courier holds
+    no foreign key to identity's users and cannot tell that user from one that
+    does not exist. The 404 appears only once a row exists and belongs to another
+    account, and never a 403 — see the rule above on leaking existence.
+  * **The first authenticated `PUT` for a user id claims it.** courier cannot ask
+    identity which account a user belongs to, so whoever writes first records the
+    owning account. An account that writes for an unwritten user id therefore
+    gains the claim — no access to anything that existed, and the real owner then
+    gets a 404. That is a real limitation rather than a design, and it is why the
+    migration that added the column **deletes** every row written through the
+    unauthenticated routes instead of backfilling a guess: an unattributable
+    opt-out is either visible to every tenant or to none, and "to none" fails in
+    the direction courier's own rule demands, *silence is not consent*.
 
 **A retryable `POST` claims its `Idempotency-Key` before it does the work, and
 only a 2xx is kept.** The ordering is the whole mechanism: a key recorded after
