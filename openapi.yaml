@@ -602,6 +602,25 @@ paths:
                               requires, and it is not a credential that has
                               ever existed. A real response carries 32 random
                               bytes, which base64-decode to nothing readable.
+
+                              A note for whoever comes here from a GitHub
+                              secret-scanning alert, as happened with all five
+                              alerts opened on this repository on 2026-10-01:
+                              the scanner matches the `whsec_`-plus-base64
+                              SHAPE, not the content, so this placeholder and
+                              any other realistic example will be flagged every
+                              time the shape appears. That is an accepted and
+                              documented cost of keeping a usable example in a
+                              public specification, not a leak to chase. If an
+                              alert points at a `whsec_` value that decodes to
+                              readable filler, or at svix's published worked
+                              example in `test/courier/inbound/signature_test.exs`
+                              — which pins signature verification against a
+                              party other than this repository and should not
+                              be removed to satisfy a scanner — resolve it as a
+                              false positive or used-in-tests. An alert on a
+                              value that decodes to nothing readable is a real
+                              one: stop, rotate, and investigate.
                             examples: ['whsec_dGhpc0lzQW5FeGFtcGxlU2lnbmluZ1NlY3JldE9ubHk=']
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
