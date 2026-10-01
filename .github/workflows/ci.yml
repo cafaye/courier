@@ -16,7 +16,7 @@
 #
 #   1. A database. `mix test` in courier is aliased to
 #      `ecto.create ++ ecto.migrate ++ test` (mix.exs), so a runner with no
-#      postgres aborts *before the first test executes*: 0 of 630 run, exit 1.
+#      postgres aborts *before the first test executes*: 0 of 724 run, exit 1.
 #      A caller cannot hand a reusable workflow a service container — GitHub
 #      allows only `name`, `uses`, `with`, `secrets`, `strategy`, `needs`, `if`,
 #      `concurrency` and `permissions` on a job that calls one, so `services:`
@@ -29,7 +29,40 @@
 #      second thing to be wrong.
 #
 #   3. The tier counts. The floors below are courier's numbers, in courier's
-#      tree. No other repository has 372 database tests or a 62-case SSRF table.
+#      tree. No other repository has 421 database tests or a 62-case SSRF table.
+#
+# HOW THESE NUMBERS WERE MEASURED, ON THIS TREE
+#
+#   A floor is a claim about the tree it lives in, so each of the four was
+#   measured on c2681ad and none was copied from another commit. The commands
+#   are the steps' own `run` bodies, run by hand, against `postgres:17-alpine`
+#   — the image this file's `services:` block pins, not whatever version a
+#   laptop happens to have — reached through `COURIER_TEST_PG_PORT`, the
+#   override config/test.exs exists for. Each run's own `Result:` line is the
+#   number; none of them is `mix test --dry-run` and none is a count of `test`
+#   blocks, because a block is not a test and a describe is not a test:
+#
+#     mix test                                            Result: 724 passed
+#     grep -rLE 'use (Courier\.DataCase|CourierWeb\.ConnCase)' … | xargs mix test
+#                                                          Result: 303 passed, 14 files
+#     grep -rlE 'use (Courier\.DataCase|CourierWeb\.ConnCase)' … | xargs mix test
+#                                                          Result: 421 passed, 21 files
+#     mix test test/courier/webhooks/url_guard_test.exs    Result:  62 passed
+#
+#   303 + 421 = 724, so the two tiers partition the suite exactly: the case
+#   templates are a real dichotomy, and a file cannot be in both or neither.
+#   The file counts come from the same `grep` the steps run, so they cannot
+#   drift from the list the step executes.
+#
+#   The header's other measured claim was measured too rather than assumed. With
+#   nothing listening on the configured port, `mix test` prints no `Result:` line
+#   at all and exits 1 — which is what "0 of 724 run, exit 1" above means, and it
+#   is the reason this tier is gated on a database it never asks for.
+#
+#   724 is the same value gate.yml's `proof[0].minimum` carries, and it is 724
+#   for the same reason in both files: this packet added the redaction boundary,
+#   the throttle and the ingest surface, and the restore of this file touched no
+#   test. The two must be raised in the same commit, for the same reason.
 #
 #   4. The lockfile guard, the coverage floor, and the release build: all three
 #      are courier's lockfile, courier's threshold, and courier's release.
@@ -126,7 +159,7 @@ jobs:
         # unpinned `postgres` means the suite's result depends on which tag was
         # cached when the job started, and a *different* tag than the compose
         # service means CI and a developer's laptop disagree about the server
-        # the 372 database-tier tests ran against.
+        # the 421 database-tier tests ran against.
         image: postgres:17-alpine
         env:
           # The credentials config/test.exs hard-codes, so `mix ecto.setup` and
@@ -199,9 +232,9 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 630
+          bin/assert-suite "$log" "whole suite (bin/prime)" 724
 
-      - name: tier — no database (258 tests, 12 files)
+      - name: tier — no database (303 tests, 14 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -209,6 +242,13 @@ jobs:
         # table included. The file list is derived from the case templates
         # rather than written out, so a new test file cannot fall outside its
         # tier, and an empty list is a hard error rather than a whole-suite run.
+        #
+        # `error_relay_test.exs` and `error_relay/policy_test.exs` are in this
+        # tier and that is the *claim* the error-reporting packet makes: the relay
+        # holds no `Repo` and adds no migration, so the redaction boundary can be
+        # tested with no database at all. `CourierWeb.ErrorReportingTest` is in
+        # the other tier because it stops `Courier.Repo` under the application
+        # supervisor to prove the same thing from the other side.
         run: |
           set -euo pipefail
           grep -rLE 'use (Courier\.DataCase|CourierWeb\.ConnCase)' test --include='*_test.exs' |
@@ -226,15 +266,23 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 258
+          bin/assert-suite "$log" "no database" 303
 
-      - name: tier — database (372 tests, 19 files)
+      - name: tier — database (421 tests, 21 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
         # and therefore through the Ecto SQL sandbox: the SQL layer, the
         # migrations `mix ecto.setup` applies, Oban's tables, and the
         # authorization matrix asserted over real requests. This is the tier
         # that dies without the `services: postgres` block above, which is why
         # the block is above.
+        #
+        # `error_reporting_test.exs` and `error_relay_endpoint_test.exs` arrived
+        # here with the error-reporting packet. Neither needs the sandbox for what
+        # it asserts — the relay and the ingest surface are stateless — but
+        # `ErrorReportingTest` reads the migration list through the repo to prove
+        # the packet added no table, and it stops the repo under the supervisor to
+        # prove the relay does not need it, so `DataCase` is the honest case
+        # template for it.
         run: |
           set -euo pipefail
           grep -rlE 'use (Courier\.DataCase|CourierWeb\.ConnCase)' test --include='*_test.exs' |
@@ -252,7 +300,7 @@ jobs:
             echo "::error::the database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "database" 372
+          bin/assert-suite "$log" "database" 421
 
       - name: tier — the SSRF table (62 tests, in-memory resolver)
         # courier-03's table, run on its own so the log carries a line that can
@@ -327,9 +375,9 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 630 passed | \`bin/assert-suite\` |"
-            echo "| no database, 12 files | 258 passed | tier step |"
-            echo "| database, 19 files | 372 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 724 passed | \`bin/assert-suite\` |"
+            echo "| no database, 14 files | 303 passed | tier step |"
+            echo "| database, 21 files | 421 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
             echo "| mix.lock | no diff after the gate | lockfile step |"
