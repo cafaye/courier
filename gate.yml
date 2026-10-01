@@ -82,25 +82,50 @@ gate:
       # that finding, which is the check working on the declaration that
       # declares the checks.
       match: '^Result: ([0-9]+) passed(?: \([^)]*\))?$'
-      # 630 is what the suite reports today, measured, not copied from core's 163
+      # 724 is what the suite reports today, measured, not copied from core's 163
       # or from courier's own CI floor. This is a DECREASE-DETECTOR: `minimum` is
-      # read from the LAST match, so a run that printed 630 and then 500 would be
-      # caught, and a suite that quietly lost 130 tests cannot report itself as
+      # read from the LAST match, so a run that printed 724 and then 500 would be
+      # caught, and a suite that quietly lost 224 tests cannot report itself as
       # passing.
       #
-      # The margin below the measured 630 is deliberate and small. courier is a
+      # The margin below the measured 724 is deliberate and small. courier is a
       # growing repository and this floor is a ratchet that is meant to be
       # raised as the suite grows, not a target the suite must hit.
       #
-      # The previous value here was 610 against a measured 616, raised by
-      # courier-16 in the same commit that closed the notification-preferences
-      # authentication gap and added its 14 tests — which is the rule this floor
-      # exists to enforce. The two value before it was 560 against a measured 564,
-      # raised by courier-14 in the same commit that added the 52
-      # `Idempotency-Key` tests. The `whole suite`, `no database` and `database`
-      # floors in CI moved with it: 630, 258 and 372, measured the same way and in
-      # the same run.
-      minimum: 624
+      # The previous value here was 624 against a measured 630, raised by the
+      # error-reporting packet in the same commit that added the 79 tests for the
+      # redaction boundary, the throttle and the ingest surface — which is the rule
+      # this floor exists to enforce. The two values before it were 610 against a
+      # measured 616 (courier-16) and 560 against a measured 564 (courier-14). The
+      # `whole suite`, `no database` and `database` floors in CI moved with it:
+      # 724, 303 and 421, measured the same way and in the same run.
+      #
+      # The whole-suite floor went 703 → 724 while the no-database floor stayed at
+      # 303, and the reason is worth recording because it is the floor doing its
+      # job. Every test added after 703 was added because running the thing found
+      # a defect, and not one of them would have been written from reading the code:
+      #
+      #   * the relay served `/internal/v1/errors` and read `x-cafaye-error-token`,
+      #     and **no Sentry SDK does either** — so every client's error was being
+      #     404'd and 401'd by the component built to receive it, invisibly, because
+      #     the test sink meant the SDK → relay HTTP hop had never been taken;
+      #   * the ingest surface answered `500` for a miscounted payload length, which
+      #     is a retry storm in whichever service miscounted;
+      #   * `Sink.parse_dsn/1` dropped the DSN's **port**, so a store on anything
+      #     but 80 was unreachable;
+      #   * the envelope header's `event_id` was a fixed all-zero string, which the
+      #     store dedupes on — so **only the first of hundreds of forwarded errors
+      #     was ever stored**, while the relay counted them all as `forwarded`;
+      #   * `Courier.Application` listed the SDK as a supervisor child, and the
+      #     error endpoint's `server:` was not set in the release path.
+      #
+      # The last two are release-only: the whole suite was green over a tree that
+      # cannot boot and a relay that cannot bind. They are worth listing as the
+      # argument for the floors rather than as a scoreboard.
+      #
+      # They all live in the database tier — they go through `CourierWeb.ConnCase` —
+      # so the database floor is the one that moved, 406 → 421.
+      minimum: 724
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres

@@ -61,6 +61,22 @@ lib/courier_web/controllers/notification_preferences_controller.ex  GET/PUT /v1
 lib/courier_web/controllers/webhook_endpoints_controller.ex  the six /v1 actions
 lib/courier_web/controllers/error_json.ex        the errors Phoenix renders
 lib/courier_web/router.ex             probes at the root, /v1 for the API
+lib/courier/error_reporting.ex        the SDK seam: capture/3, capture_any/3,
+                                      enabled?/0, allowed?/1
+lib/courier/error_reporting/filter.ex the SDK's before_send: the first barrier
+lib/courier/error_relay.ex            the fleet's redaction chokepoint: the
+                                      throttle, the counters, the ingest entry
+lib/courier/error_relay/policy.ex     the allowlists, the blocked values, the
+                                      error.type vocabulary, the fingerprint
+lib/courier/error_relay/sender.ex     the bounded queue and its brutal-kill drain
+lib/courier/error_relay/sink.ex       Sentry envelope framing, both directions
+lib/courier/error_relay/sink/req.ex   the sink that ships, one attempt, no retry
+lib/courier/error_relay/sink/noop.ex  the sink that counts what it discards
+lib/courier_web/error_endpoint.ex     the ingest listener, on its own port
+lib/courier_web/error_router.ex       /api/:project_id/envelope/, and the probe
+lib/courier_web/controllers/error_envelope_controller.ex    one envelope, in
+lib/courier_web/controllers/error_envelope_health_controller.ex  the relay's
+lib/courier_web/plugs/ingest_token.ex the shared secret, from X-Sentry-Auth
 test/courier/health_test.exs          the readiness check, on its own
 test/courier/mailers_test.exs         what the platform hands in, per message
 test/courier/mailers_config_test.exs  the sender and the subject are config
@@ -78,6 +94,15 @@ test/courier/webhooks/signature_test.exs       the spec's scheme, verified twice
 test/courier/webhooks/url_guard_test.exs       every blocked address class
 test/courier/webhooks/payload_test.exs         the bytes on the wire
 test/courier/webhooks/sender_test.exs          the request and its classification
+test/courier/error_relay/policy_test.exs the allowlists, the canaries, the
+                                      vocabulary, and the fingerprint
+test/courier/error_relay_test.exs      the throttle, the counters, and the
+                                      end-to-end boundary on the stored bytes
+test/courier_web/error_reporting_test.exs  the SDK-side filter: a canary that
+                                      fails the test if it ever reaches an event
+test/courier_web/error_relay_endpoint_test.exs  the ingest surface: the token,
+                                      the route an SDK actually derives, and
+                                      the SDK's own framing
 test/courier/workers/                 the relay, the fan-out, and the sender
 test/courier_web/controllers/          the API, and the authorization matrix
 test/courier_web/router_test.exs      which controller, which scope, which methods
@@ -93,6 +118,11 @@ test/support/openapi_paths.ex        the reader and the comparison the two above
 test/support/recording_sender.ex      a sender that records instead of sending
 test/support/header_resolver.ex       a principal that reads a header
 test/support/test_dns.ex              a resolver that answers from a table
+test/support/clock.ex                 the relay's injected clock, for throttle tests
+test/support/recording_sink.ex        a sink that records envelopes instead of
+                                      forwarding them
+test/support/failing_sink.ex          a sink that raises, for the queue's drain
+test/support/sentry_test_client.ex    the SDK's transport, pointed at a test sink
 gate.yml                              the gate, DECLARED: command, proof, what it needs
 bin/prime                             the gate: deps, database, tests
 bin/assert-suite                      refuses a run that skipped or excluded tests
@@ -101,6 +131,9 @@ bin/toolchain-pins                    reads mise.toml, checks CI has not drifted
 .github/workflows/ci.yml              calls kit's workflow, plus gate and release
 Dockerfile                            two-stage release build, slim final stage
 docker-compose.yml                    postgres:17-alpine plus the release image
+docker-compose.errors.yml             the error stack: Glitchtip pinned by digest,
+                                      and its own database on the SAME postgres
+ops/glitchtip-database.sql            the store's role and database, idempotent
 rel/overlays/bin/server               the release entrypoint the image runs
 rel/overlays/bin/migrate              the release's migration entrypoint
 ```
@@ -311,6 +344,55 @@ account comes from `conn.assigns.current_account`, never from a request body —
 `CourierWeb.Plugs.Principal` is a seam with a refusing default, so a courier
 without identity's JWT verifier is locked rather than open.
 
+**The error path is a redaction boundary with two barriers, and the second one is
+the fleet's.** `Courier.ErrorReporting.Filter` is the Sentry SDK's `before_send`
+and applies an allowlist **before the envelope exists**, so a DSN misconfigured to
+point at a third party still cannot ship an exception message or a request URL.
+`Courier.ErrorRelay.Policy` applies the same allowlist again on the way in, on
+every service's envelopes, including courier's own. Two barriers is core's
+`defenceInDepth`, and the `blocked_values` list is copied **byte-for-byte** from
+the OTel collector's, so a value the collector would never persist is a value the
+relay never forwards.
+
+**An error store is retained and widely readable, so the exception message is not
+in it.** That is the price of admission and it is stated rather than absorbed:
+`Policy` keeps `error.type`, the exception **class**, file, line and function, and
+drops the message and the frame variables. The collector already deletes
+`exception.message` and `exception.stacktrace` for the same reason — the two
+boundaries are the same decision applied twice. Anything that needs a message in a
+dashboard is an event, and events go to the trace pipeline.
+
+**The relay speaks the Sentry ingest protocol, because every client is a Sentry
+SDK and an SDK cannot be told where to post.** The route is
+`POST /api/:project_id/envelope/` and the token arrives in `X-Sentry-Auth` as
+`sentry_key`; the project id is the SDK's framing and is **ignored**, because all
+three services report into the one project `COURIER_ERROR_SINK_DSN` names. A
+courier-authored header (`x-cafaye-error-token`) would have refused every envelope
+of every client it exists to serve, which is what happened and what
+`CourierWeb.ErrorRelayEndpointTest` now holds the derivation for.
+
+**Nothing in the error path may raise, and nothing in it may block a request.**
+The ingest surface answers `200 {}` and counts a reason for every body it cannot
+use — a Sentry SDK retries every non-2xx, so a `400` for a malformed envelope is
+a retry storm and a `500` for a redaction bug is worse. `Courier.ErrorRelay`
+answers before anything is forwarded, the queue is bounded, and
+`Sink.Req` makes exactly one attempt with no retry loop against a dead store: a
+lost error is strictly better than a growing process. The error store is
+GlitchTip's own database; **no migration was added to courier**, which
+`CourierWeb.ErrorReportingTest` asserts rather than trusting.
+
+**Run the release image, not just the suite.** Five defects in this packet were
+invisible to 700 passing tests and found within an hour of `docker compose up`:
+a route no SDK derives, a header no SDK sends, a `500` on a miscounted payload
+length, a DSN whose **port** was dropped, and — worst — an envelope header whose
+`event_id` was a fixed all-zero string that the store dedupes on, so only the
+first of hundreds of forwarded errors was ever stored while the relay counted them
+all. Nothing in courier could see that one: the relay said `forwarded`, the store
+said `200`, and the database held one row. **The only observation that
+distinguishes "stored" from "accepted" is counting rows in the store**, and the
+supervision tree and the release-only `server:` flag are likewise only exercised by
+booting a release.
+
 ## Environment
 
 `DATABASE_URL`, `SECRET_KEY_BASE` and `PHX_HOST`, as any Phoenix release needs,
@@ -324,11 +406,56 @@ plus one this packet added:
   every stored secret has to be re-issued, because the plaintext cannot be
   recovered from the ciphertext.
 
+Plus three this packet added, all of which are **absent rather than defaulted**
+where a default would be a credential, and see `config/runtime.exs` for the
+reasoning in full:
+
+- **`COURIER_ERROR_RELAY_TOKEN`** — the shared secret every service presents when
+  it reports an unhandled error (`openssl rand -hex 32`). **Required**: with no
+  token the ingest surface refuses every envelope, which is the safe direction,
+  but a deployment that means to run the relay and has none would silently report
+  nothing, so it is refused at boot. It is the *key half* of what an operator
+  writes as a DSN — `http://<token>@courier:4003/1` — because a Sentry SDK sends
+  it as `sentry_key` inside `X-Sentry-Auth`, which is why
+  `CourierWeb.Plugs.IngestToken` reads that header and not one of courier's own.
+- **`COURIER_ERROR_SINK_DSN`** — the GlitchTip DSN the relay forwards to.
+  **Optional**, and unset means `Courier.ErrorRelay.Sink.Noop` counts what it
+  discards: a missing error store must never take the notification service down.
+  A DSN is a credential and is never logged — `Sink.Req` parses it once at boot
+  and every refusal it reports is a symbol.
+- **`COURIER_ERROR_REPORTING_DSN`** — courier's **own** failures, pointing at its
+  own relay. **Optional**; unset means `Courier.ErrorReporting.enabled?/0` is
+  false, which is a diagnosable state. A DSN pointed at a third party by mistake
+  is survivable because `Courier.ErrorReporting.Filter` applies the same
+  allowlist before the envelope exists.
+
+`COURIER_RELEASE` and `DEPLOYMENT_ENVIRONMENT` are also read, and are **not
+invented with defaults** in the sense that matters: an operator sets them, and the
+release is on the event so the store can resolve an issue when a fix ships.
+
 ## Toolchain
 
 mise, from `mise.toml`: `mise install`, then `mise run prime` for the gate.
 For container work: `docker compose up --build` starts postgres:17-alpine and the
 release image, and `docker compose down -v` throws the volume away.
+
+For the error stack, add the second file:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.errors.yml up -d
+```
+
+which adds GlitchTip on `localhost:8000` with its **own database and role on the
+same postgres:17-alpine** — one image fleet-wide, and the isolation that matters
+is the data. Port 4003 is deliberately **not** published: the ingest surface is
+authenticated by a shared secret rather than a per-caller principal, and
+`courier:4003` on the compose network is where the three services reach it.
+`ops/glitchtip-database.sql` only runs on a **fresh** volume, and applying it to
+an existing one is in the file's own comment.
+
+A local developer whose machine already runs postgres on 5432 sets
+`COURIER_TEST_PG_PORT` — see `config/test.exs`; moving another project's server is
+not courier's call to make.
 
 ## Generated rules
 

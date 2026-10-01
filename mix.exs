@@ -61,6 +61,26 @@ defmodule Courier.MixProject do
       # `:httpc`"), so the webhook pipeline uses it rather than `:httpc` from OTP or
       # a second client library.
       {:req, "~> 0.5"},
+      # Error reporting. The `sentry` hex package, which is the Sentry-protocol
+      # client for Elixir and is **MIT** — verified at
+      # `https://github.com/getsentry/sentry-elixir` (LICENSE: "The MIT License
+      # (MIT)") and in the package's own `metadata.config`
+      # (`{<<"licenses">>,[<<"MIT">>]}` in the 13.5.1 tarball). It is the client
+      # library, not a server: it speaks the Sentry envelope protocol, and this
+      # deployment points it at courier's own relay rather than at anybody's
+      # SaaS. That distinction is the whole reason the licence question is clean
+      # — Sentry's *server* is FSL-1.1-Apache-2.0 and is disqualified for a
+      # commercial hosted offering, while the SDKs are permissively licensed and
+      # are what this dependency is.
+      #
+      # Declared for **all** environments, unlike `excoveralls` below, and the
+      # reason is the test requirement rather than tidiness: "reporting is off in
+      # test" has to be a fact this repository can assert, and a dep that is not
+      # in the test environment cannot be asserted about at all. What is off in
+      # test is the *configuration* — `config/test.exs` sets no DSN and
+      # `Courier.ErrorReporting.enabled?/0` is false — not the code being
+      # compiled.
+      {:sentry, "~> 13.5"},
       # `mix coveralls` — the coverage gate kit's shared Elixir job runs, and the
       # one this repository's own CI job runs. Two things about it are load
       # bearing and neither is guessable:
