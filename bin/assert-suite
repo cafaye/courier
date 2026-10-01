@@ -11,7 +11,7 @@
 #
 # WHAT IT PROVES, AND WHY IT IS A FLOOR RATHER THAN AN EQUALITY
 #
-#   The floors are decrease detectors. 488 today; 487 is a deleted test and this
+#   The floors are decrease detectors. 616 today; 615 is a deleted test and this
 #   goes red. They are not targets and they are not read out of the run, so a
 #   run cannot satisfy itself by having fewer tests.
 #
@@ -34,7 +34,7 @@
 #   The CI job runs this against the log bin/prime writes. The same two commands
 #   on a laptop are the whole thing:
 #
-#     ./bin/prime > /tmp/prime.log 2>&1 && bin/assert-suite /tmp/prime.log "whole suite" 488
+#     ./bin/prime > /tmp/prime.log 2>&1 && bin/assert-suite /tmp/prime.log "whole suite" 616
 #
 #   Nothing here is CI-only: the floor is an argument, so a developer can hold a
 #   different tree to a different number without editing this file.

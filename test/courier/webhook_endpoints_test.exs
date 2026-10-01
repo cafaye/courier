@@ -30,6 +30,19 @@ defmodule Courier.WebhookEndpointsTest do
     endpoint
   end
 
+  # How many endpoint rows exist for one account.
+  #
+  # Scoped to the tenancy key on purpose. `Repo.aggregate(WebhookEndpoint, :count)`
+  # is a claim about every other test in the repository as much as about this one:
+  # it is green only while nothing else has ever written a row, and it turns red
+  # the instant one is visible — a statement about the order the suite happened to
+  # run in, not about `Courier.WebhookEndpoints`. Counting one account's rows
+  # keeps the assertion on the code under test and makes it independent of every
+  # other test here and in every other file.
+  defp rows_for(account_id) do
+    Repo.aggregate(from(e in WebhookEndpoint, where: e.account_id == ^account_id), :count)
+  end
+
   describe "create/1" do
     test "stores the endpoint" do
       endpoint = create!()
@@ -111,26 +124,40 @@ defmodule Courier.WebhookEndpointsTest do
     end
 
     test "stores nothing when the changeset is rejected" do
-      {:error, _changeset} = WebhookEndpoints.create(attrs(%{url: 42}))
+      # This test's own account, so "no row was written" is a claim about what
+      # this call did and nothing else. See `rows_for/1`.
+      account_id = Ecto.UUID.generate()
 
-      assert Repo.aggregate(WebhookEndpoint, :count) == 0
+      {:error, _changeset} =
+        WebhookEndpoints.create(attrs(%{url: 42, account_id: account_id}))
+
+      assert rows_for(account_id) == 0
     end
 
     test "stores nothing when the url is refused as an SSRF target" do
       # The guard runs before the insert, so an endpoint pointing at the metadata
-      # service is not a row courier has to remember to refuse later.
-      assert {:error, :blocked_address} =
-               WebhookEndpoints.create(attrs(%{url: "http://169.254.169.254/latest/meta-data/"}))
+      # service is not a row courier has to remember to refuse later. The account
+      # is this test's own — see `rows_for/1`.
+      account_id = Ecto.UUID.generate()
 
-      assert Repo.aggregate(WebhookEndpoint, :count) == 0
+      assert {:error, :blocked_address} =
+               WebhookEndpoints.create(
+                 attrs(%{url: "http://169.254.169.254/latest/meta-data/", account_id: account_id})
+               )
+
+      assert rows_for(account_id) == 0
     end
 
     test "the guard runs before the insert, so a refused url never becomes a row" do
+      account_id = Ecto.UUID.generate()
+
       assert {:error, changeset} =
-               WebhookEndpoints.create(attrs(%{url: "file:///etc/passwd"}))
+               WebhookEndpoints.create(
+                 attrs(%{url: "file:///etc/passwd", account_id: account_id})
+               )
 
       assert errors_on(changeset).url != []
-      assert Repo.aggregate(WebhookEndpoint, :count) == 0
+      assert rows_for(account_id) == 0
     end
   end
 

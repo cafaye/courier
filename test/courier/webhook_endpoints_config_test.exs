@@ -33,22 +33,39 @@ defmodule Courier.WebhookEndpointsConfigTest do
     Application.put_env(:courier, :dns_resolver, {TestDns, {:canned, answers}})
   end
 
-  defp create(url) do
-    WebhookEndpoints.create(%{url: url, account_id: @account_id})
+  defp create(url), do: create(url, @account_id)
+
+  defp create(url, account_id) do
+    WebhookEndpoints.create(%{url: url, account_id: account_id})
+  end
+
+  # How many endpoint rows exist for one account.
+  #
+  # Scoped to the tenancy key on purpose. `Repo.aggregate(WebhookEndpoint, :count)`
+  # is a claim about every other test in the repository as much as about this one:
+  # it is green only while nothing else has ever written a row, and it turns red
+  # the instant one is visible — a statement about the order the suite happened to
+  # run in, not about `Courier.WebhookEndpoints`. Each test below that asserts
+  # "no row was written" mints its own account, so it is counting only what its
+  # own call could have written.
+  defp rows_for(account_id) do
+    Repo.aggregate(from(e in WebhookEndpoint, where: e.account_id == ^account_id), :count)
   end
 
   test "a name that resolves to a private address is refused, and no row is written" do
     resolve_to(["10.0.0.5"])
+    account_id = Ecto.UUID.generate()
 
-    assert {:error, :blocked_address} = create("https://rebind.example.com/events")
-    assert Repo.aggregate(WebhookEndpoint, :count) == 0
+    assert {:error, :blocked_address} = create("https://rebind.example.com/events", account_id)
+    assert rows_for(account_id) == 0
   end
 
   test "a name that resolves to the metadata service is refused" do
     resolve_to(["169.254.169.254"])
+    account_id = Ecto.UUID.generate()
 
-    assert {:error, :blocked_address} = create("https://metadata.example.com/latest/")
-    assert Repo.aggregate(WebhookEndpoint, :count) == 0
+    assert {:error, :blocked_address} = create("https://metadata.example.com/latest/", account_id)
+    assert rows_for(account_id) == 0
   end
 
   test "a name whose answers are mixed is refused" do
@@ -61,9 +78,10 @@ defmodule Courier.WebhookEndpointsConfigTest do
     # Storing it and finding out later would leave a row courier has to remember
     # is undeliverable; the customer gets the answer at the moment they ask.
     resolve_to(:nxdomain)
+    account_id = Ecto.UUID.generate()
 
-    assert {:error, :dns_failure} = create("https://nowhere.example.com/events")
-    assert Repo.aggregate(WebhookEndpoint, :count) == 0
+    assert {:error, :dns_failure} = create("https://nowhere.example.com/events", account_id)
+    assert rows_for(account_id) == 0
   end
 
   test "a public name under the same resolver is accepted" do
