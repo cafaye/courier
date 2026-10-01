@@ -32,6 +32,11 @@ lib/courier/events.ex                 the CloudEvents envelope and the catalog
 lib/courier/outbox_event.ex           one emission, and the envelope it publishes
 lib/courier/notification_preference.ex         the row behind a user's answer
 lib/courier/notification_preferences.ex       read and write those answers
+lib/courier/inbound.ex                the behaviour: verify, then parse, then
+                                      ingest, in THAT order
+lib/courier/inbound/signature.ex       the CONSUMER's half of the Standard Webhooks
+                                      scheme: is this POST really the provider?
+lib/courier/inbound/resend.ex         Resend's reports in courier's vocabulary
 lib/courier/nats_publisher.ex         the behaviour the relay publishes through
 lib/courier/nats_publisher/noop.ex    the stand-in that hands envelopes back
 lib/courier/observability.ex          the span-attribute ALLOWLIST, and the one
@@ -137,6 +142,15 @@ test/courier/webhooks/signature_test.exs       the spec's scheme, verified twice
 test/courier/webhooks/url_guard_test.exs       every blocked address class
 test/courier/webhooks/payload_test.exs         the bytes on the wire
 test/courier/webhooks/sender_test.exs          the request and its classification
+test/courier/inbound/                 the verified-inbound base: a provider's own
+                                       documented payloads, and the scheme as a
+                                       published test vector
+test/courier/inbound/resend_test.exs   Resend's payloads verbatim, and the mapping
+test/courier/inbound/signature_test.exs  svix's own published vector, and every
+                                      way a request is not authentic
+test/courier/inbound_test.exs         THE PROOF: the whole inbound path against a
+                                      real email_suppressions table, so "an unsigned
+                                      payload records nothing" is a claim about rows
 test/courier/workers/                 the relay, the fan-out, and the sender
 test/courier_web/controllers/          the API, and the authorization matrix
 test/courier_web/controllers/messages_controller_test.exs  the send surface:
@@ -158,6 +172,8 @@ test/support/header_resolver.ex       a principal that reads a header
 test/support/test_dns.ex              a resolver that answers from a table
 test/support/test_span_exporter.ex    the exporter that records instead of sending
 test/support/test_spans.ex            reading those spans, and RAISING on empty
+test/support/fake_resend.ex           a Resend that SIGNS, so workers B and C can
+                                      test the inbound path with no provider
 test/support/smtp_server.ex           a real SMTP server for the round-trip test:
                                       :gen_smtp_server on a kernel-assigned
                                       loopback port
@@ -505,6 +521,70 @@ and `Courier.Idempotency` rather than left in this file alone, because both fail
 given), and Ecto's keyword `where/2` **does not apply the schema's field type**,
 so a `DateTime` compared against a `utc_datetime_usec` column matches nothing.
 Use the `where([k], ...)` macro form and `IO.iodata_to_binary/1`.
+
+**The inbound path verifies before it parses, and that order is the security
+property.** `Courier.Suppressions.ingest/1` was written, tested, documented as
+"the HTTP surface's entry point" — and nothing called it, so the suppression
+table was only ever written by tests and a customer who hard-bounced was mailed
+again forever. The obvious way to give it a caller is a route that
+`Jason.decode!`s a body and passes it in, and that route is an unauthenticated
+`POST` that records suppressions: anyone who finds the URL can suppress anyone's
+mail, which is a denial of service on the whole product delivered by the feature
+meant to protect it. So `Courier.Inbound.handle/5` verifies first and parses
+only on `:ok`, and `test/courier/inbound_test.exs` drives the real
+`Courier.Suppressions` against the real `email_suppressions` table and asserts
+**no row exists** afterwards. It is a `Courier.DataCase` for that reason alone: a
+mock would make "the parser refused" and "the row is absent" the same claim. A
+negative assertion is paired with a positive one throughout, because a boundary
+that records nothing ever passes every "records nothing" test.
+
+**The verifier's correctness is pinned to a vector the PROVIDER published, not to
+courier's own signer.** `Courier.Webhooks.Verifier`'s moduledoc says courier is a
+producer and "nothing here receives webhooks"; Resend signs with Svix, which is
+the scheme Standard Webhooks was standardised from, so `Courier.Inbound.Signature`
+reuses `Courier.Webhooks.Signature` rather than reimplementing the crypto — and
+`test/courier/inbound/signature_test.exs` leads with Svix's own worked example
+from <https://docs.svix.com/receiving/verifying-payloads/how-manual>, because
+"a test that asserted the signer against itself would pass even if the base
+string were wrong". Resend's own verification page prints a signature whose
+secret it never shows (`process.env.WEBHOOK_SECRET`); measured, it is NOT the
+HMAC of the body printed beside it, and the test file records that rather than
+building a fixture on a coincidence. Two rules that look like details and are not:
+the signing secret is checked **before** any header, so a courier deployed without
+one reports its own misconfiguration on every request rather than an attacker's
+missing header; and `:crypto.hash_equals/2` is called behind a `byte_size` guard,
+because it **raises** `ArgumentError` on a length mismatch and an unguarded call
+turns "POST a 4-character signature" into a 500. **The constant-time comparison
+is the one claim no behavioural test can catch** — mutating `hash_equals` to `==`
+left the suite at 108/108 green — so it is asserted on the source, and the test
+says why a timing test would be worse than useless.
+
+**A provider payload written from memory is indistinguishable from a correct one
+until the provider's real bytes arrive**, and by then it is in production rows.
+Every payload in `resend_test.exs` is copied from a named
+`resend.com/docs/...` page. Two things that reading the docs changed: the bounce
+vocabulary is `Permanent` / `Transient` / `Undetermined` on one page and
+`Permanent` / `Temporary` on another, so **both** soft spellings are accepted and
+`Undetermined` is deliberately soft — being told there was a bounce is not being
+told the mailbox is gone, and `Courier.Suppressions` already states the asymmetry
+("being wrong towards sending is expensive and cumulative"). And
+`provider_event_id` is `"<type>/<email_id>:<address>"`, all three parts, because
+a **broadcast shares one `email_id` across every recipient**: keyed on the email
+alone, four of five bounces collide with the first and four live mailboxes go on
+being mailed forever. The `email.complained/` prefix is load-bearing for the same
+reason from the other side — measured, a complaint about an address that had
+already hard-bounced collided with the bounce's row, the unique index returned
+`duplicate`, and the `:suppressed` row was never written, inverting the one
+precedence rule `Courier.Suppressions` exists to make unbreakable.
+
+**An event courier cannot classify is refused, not defaulted.**
+`{:error, :unsupported_event}` for a `type` courier has not read, and
+`{:error, {:unknown_bounce_type, value}}` for a bounce type outside the documented
+set — the same fail-closed choice as `Courier.ErrorReporting.Filter` returning nil
+rather than emitting what it cannot redact. A provider that adds an event type
+should produce a log line, not silence. The distinction that matters: a KNOWN
+value meaning "the provider does not know" (`Undetermined`) is classified, and an
+UNKNOWN value is a refusal.
 
 **A webhook signature is not courier's to invent.** PLAN.md §7 adopted [Standard
 Webhooks](https://www.standardwebhooks.com) and said "No custom scheme", which
