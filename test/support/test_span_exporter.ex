@@ -1,0 +1,129 @@
+defmodule Courier.TestSpanExporter do
+  @moduledoc """
+  An in-memory OTLP exporter, so a test can read the spans courier produced.
+
+  NOT A MOCK. This is the real OpenTelemetry SDK with its real exporter replaced
+  by one that copies the finished spans into a table the test owns. What the test
+  reads is the payload an operator's collector would have received — span names,
+  attribute names, attribute values, statuses, resources and all. Asserting on a
+  hand-built map would prove the TEST's idea of the payload is correct, which is
+  not the property under test.
+
+  In a table rather than in the test process, and that is not tidiness: the SDK
+  exports on the process that ended the span, which in a Phoenix endpoint is a
+  Bandit connection process, not the test. A message to the test process would
+  need a registered owner per test, and an owner that outlives its test is a
+  message to a dead pid.
+
+  ## Why this file is fussier than it looks
+
+  Three things about the SDK's exporter interface are not guessable, and each was
+  got wrong first. All three fail in the SAME way — silently — and that is what
+  makes them worth writing down.
+
+    1. `init/1` must return `{:ok, state}` or `:ignore`. `otel_exporter:init/1`
+       matches `try ExporterModule:init(Config) of {ok, State} -> …; ignore -> …
+       end` with NO catch-all, so a bare `:ok` is a TryClauseError inside a
+       gen_statem. The processor is then dropped by
+       `otel_tracer_server:init_processor/3` with a log at `info`.
+    2. `export/4`, not `export/3`. The callback is
+       `export(signal, table, resource, config)`; an `export/3` is not a callback
+       at all, so it is never called and every span is discarded.
+    3. The second argument is an ETS TABLE the processor owns, not a list of
+       spans, and the rows are still in it at that moment.
+
+  Each of those leaves the suite GREEN. "No canary reached a span" is true of a
+  span that was never exported, so a broken exporter makes every redaction
+  assertion in this repository pass, in about a second, having proved nothing.
+  That is why every canary test here pairs its absence assertion with a PRESENCE
+  assertion, and why `rendered!/0` refuses to return an empty string.
+
+  The error that gives it away is at `info` and names the module:
+
+      [warning] Exporter module Courier.TestSpanExporter not found.
+  """
+
+  @behaviour :otel_exporter
+
+  @table :courier_test_spans
+
+  @impl true
+  def init(_config), do: {:ok, %{}}
+
+  @impl true
+  def export(:traces, sdk_table, _resource, _config) do
+    ensure_table()
+
+    spans =
+      sdk_table
+      |> :ets.tab2list()
+      |> Enum.map(fn {_span_id, record} -> Courier.TestSpans.readable(record) end)
+      |> Enum.sort_by(& &1.start_time)
+
+    :ets.insert(@table, Enum.map(spans, fn span -> {:erlang.unique_integer(), span} end))
+    :ok
+  end
+
+  def export(:logs, _sdk_table, _resource, _config), do: :ok
+  def export(:metrics, _sdk_table, _resource, _config), do: :ok
+
+  @impl true
+  def shutdown(_config), do: :ok
+
+  @doc "Every span exported so far, oldest first."
+  def take do
+    ensure_table()
+    :ets.tab2list(@table) |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&elem(&1, 1))
+  end
+
+  @doc """
+  A watermark: the value to pass to `take_since/1` to read only what comes next.
+
+  WHY, and it is not tidiness. The suite is mostly `async: true` and every request
+  through the endpoint exports a span into THIS table, so a test that clears the
+  table and then reads it is reading whatever any other test happened to export
+  while it was working. The first version did exactly that and failed with
+  "expected exactly one exported span, got 8" — eight being every request the rest
+  of the suite had made in the meantime.
+
+  An earlier version avoided it with `clear/1`, which is worse: clearing a shared
+  table is a test deleting another test's evidence, so two tests asserting the same
+  time pass or fail depending on the scheduler. A watermark reads only what this
+  test produced, and leaves everyone else's alone.
+  """
+  def mark do
+    ensure_table()
+    :erlang.unique_integer([:monotonic, :positive])
+  end
+
+  @doc "The spans exported since `mark`, oldest first."
+  def take_since(mark) do
+    ensure_table()
+
+    @table
+    |> :ets.tab2list()
+    |> Enum.filter(fn {id, _span} -> id > mark end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  @doc """
+  Forget everything.
+
+  Not tidiness: without it, one test's spans satisfy the NEXT test's absence
+  assertion, and a suite of canary tests where each one sees the previous one's
+  spans is a suite that proves less the longer it runs.
+  """
+  def clear do
+    ensure_table()
+    :ets.delete_all_objects(@table)
+    :ok
+  end
+
+  defp ensure_table do
+    case :ets.whereis(@table) do
+      :undefined -> :ets.new(@table, [:public, :named_table, :set])
+      _ -> @table
+    end
+  end
+end

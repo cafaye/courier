@@ -25,7 +25,13 @@ defmodule Courier.MixProject do
   def application do
     [
       mod: {Courier.Application, []},
-      extra_applications: [:logger, :runtime_tools]
+      # `:opentelemetry` is here because the SDK is an OTP application started by
+      # the application controller, and it has to be started before
+      # `Courier.Application.start/2` for its configuration (in
+      # `config/runtime.exs`) to take effect. Adding it to `applications` instead
+      # would start it after courier's own supervisor and the exporter would never
+      # be built.
+      extra_applications: [:logger, :runtime_tools, :opentelemetry]
     ]
   end
 
@@ -50,6 +56,19 @@ defmodule Courier.MixProject do
       {:postgrex, ">= 0.0.0"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
+      # OpenTelemetry. The trace SDK and the OTLP exporter, and the reason each is
+      # named here is in lib/courier/telemetry.ex: without them courier has no way
+      # to emit a span at all, and kit's collector has nothing to redact.
+      #
+      # `only: [:dev, :test, :prod]` is deliberately not a restriction — it is
+      # every environment courier has. The exporter is a real dependency in every
+      # one because `<SERVICE>_OTEL_ENDPOINT` is ON BY DEFAULT (core D16): a
+      # developer running `mix phx.server` exports into the collector that ships
+      # with the stack, and that is the whole of "a deployer gets traces without
+      # assembling them". Gating the exporter to :prod would make the default a
+      # no-op everywhere it is actually used, which is backwards.
+      {:opentelemetry, "~> 1.7"},
+      {:opentelemetry_exporter, "~> 1.11"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},

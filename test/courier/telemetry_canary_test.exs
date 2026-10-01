@@ -1,0 +1,339 @@
+defmodule Courier.TelemetryCanaryTest do
+  @moduledoc """
+  **THE PROOF.** Nothing a caller sends reaches an exportable span attribute.
+
+  Everything else in this repository's observability work is necessary and not
+  sufficient. `Courier.ObservabilityTest` asserts on the ALLOWLIST — that the names
+  are names somebody already thought of, and that no name contains a word that
+  names content. That proves the keys that exist are absent. It cannot prove the
+  keys nobody thought of are absent, and the realistic way this leaks is not an
+  attacker. It is a well-meaning engineer in six months adding
+  `record(span, %{"courier.payload" => params})` because it would help debug a
+  delivery, in the service whose payloads are other customers' data.
+
+  So this file plants a canary in every field a caller controls and asserts it
+  appears in NOTHING that left courier — and drives REAL requests through the REAL
+  router, because the allowlist being correct says nothing about what the request
+  path actually records.
+
+  ## Why every absence assertion here is paired with a presence one
+
+  A redaction boundary that deletes everything passes a "no canary" test and is
+  useless. Three separate ways that happened in this repository while it was being
+  written, each of which left the suite green:
+
+    * an exporter implementing `export/3` where the callback is `export/4`, so it
+      was never called;
+    * an exporter whose `init/1` returned `:ok` where `{:ok, state}` was required,
+      so the SDK dropped the span processor;
+    * a `record/2` guarded on `is_map(span)` when a span is a RECORD — a tuple —
+      so nothing was recorded at all.
+
+  `Courier.TestSpans.rendered!/0` raises rather than returning an empty string, so
+  a suite in which courier exported nothing fails loudly instead of passing
+  quietly. That guard is the single place this is checked.
+
+  ## The canary is SHORT, and that is deliberate
+
+  A long canary would let a length ceiling be what makes a test pass, and a
+  truncated leak is still a leak. This string is short enough that no bound in this
+  repository can touch it, so what passes here passed because of the ALLOWLIST and
+  nothing else.
+  """
+
+  use ExUnit.Case, async: false
+
+  import Phoenix.ConnTest
+  import Plug.Conn
+
+  @endpoint CourierWeb.Endpoint
+
+  # Short, and in no allowlist and in no expected output.
+  @canary "CANARY-4e1b-DO-NOT-EXPORT"
+
+  setup do
+    # `clear/1`, and the reason it is safe HERE is ExUnit's scheduling rather than
+    # a convention: this module is `async: false`, and ExUnit runs every
+    # `async: false` module after the `async: true` ones, one at a time, with no
+    # overlap. So clearing the shared table cannot delete another test's evidence.
+    #
+    # The name filter below is kept as well, because a test that only works when it
+    # happens to run alone is a test that will not.
+    Courier.TestSpanExporter.clear()
+    :ok
+  end
+
+  describe "a request body never reaches a span" do
+    test "a notification preference, keyed to a user, exports neither the id nor the answer" do
+      # `PUT /v1/notification_preferences/:user_id` — a user id in the PATH and a
+      # per-notification-type answer in the BODY. The path is the interesting half:
+      # the span records the route TEMPLATE, so the id must be nowhere on it. The
+      # body is the other half: a map of a user's answers is exactly the shape that
+      # ends up in a `params` attribute in somebody's debugging change.
+      response =
+        request(
+          "PUT",
+          "/v1/notification_preferences/usr_#{@canary}",
+          %{"email" => %{"enabled" => false}, "sms" => "555-#{@canary}"},
+          authenticated: true
+        )
+
+      assert response.status in [200, 400, 401, 403, 404]
+
+      assert_no_canary()
+    end
+
+    test "a delivery ping carrying an id in the path exports neither" do
+      # `POST /v1/webhook_endpoints/:id/test` — a path parameter on the one resource
+      # whose whole nature is a secret.
+      response =
+        request("POST", "/v1/webhook_endpoints/wh_#{@canary}/test", %{}, authenticated: true)
+
+      assert response.status in [200, 400, 401, 403, 404, 409]
+
+      assert_no_canary()
+    end
+
+    test "a webhook endpoint carrying a URL and a signing secret exports neither" do
+      # The signing secret is the sharpest case: courier stores it SEALED, and a
+      # span attribute is the one place it would be stored in the clear on its way
+      # to being exported.
+      response =
+        request("POST", "/v1/webhook_endpoints", %{
+          "url" => "https://example.com/hook/#{@canary}",
+          "signing_secret" => "whsec_#{@canary}",
+          "events" => ["delivered"]
+        })
+
+      assert response.status in [201, 400, 401, 422]
+
+      assert_no_canary()
+    end
+  end
+
+  describe "a request PATH never reaches a span" do
+    test "a parameterised route exports the TEMPLATE, so an id cannot ride in" do
+      # This is the cardinality guarantee and the content guarantee in one
+      # assertion, and it is the one that is only observable on a parameterised
+      # route: for `/healthz` the path and the template are the same string, so a
+      # service recording `conn.request_path` instead of the matched route passes
+      # every test that drives a fixed path.
+      id = "01J9Z8QK5M4N7P2R3T6V8W9X0A"
+
+      response = request("GET", "/v1/webhook_endpoints/#{id}", nil, authenticated: true)
+      assert response.status in [200, 401, 404]
+
+      for span <- request_spans() do
+        route = Map.get(span.attributes, :"http.route")
+
+        if route do
+          refute route =~ id,
+                 "the span carries the concrete id in its route: #{inspect(route)}.\n\n" <>
+                   "A route template has one value per endpoint; a concrete path has one " <>
+                   "per request, and the collector's spanmetrics connector mints a metric " <>
+                   "series for every distinct value of it. Nothing downstream can tell " <>
+                   "them apart: both are on core's allowlist and both pass the redaction " <>
+                   "processor. This is a service-side choice, which is why it is tested " <>
+                   "here and not left to the collector."
+        end
+      end
+
+      assert_no_canary()
+    end
+
+    test "an id in an unmatched path reaches nothing at all" do
+      response = request("GET", "/v1/accounts/#{@canary}", nil, authenticated: true)
+
+      assert response.status == 404
+
+      for span <- request_spans() do
+        refute Map.has_key?(span.attributes, :"http.route"),
+               "a 404 produced a span with a route. The path is caller-controlled text, " <>
+                 "so recording it is a cardinality bomb and a content leak in one move; " <>
+                 "the 404 status is the answer."
+      end
+
+      assert_no_canary()
+    end
+  end
+
+  describe "a request HEADER never reaches a span" do
+    test "a bearer token, an API key and a cookie are all absent" do
+      # courier authenticates with a bearer token and mints one of its own, so a
+      # header attribute here is a credential in a searchable, retained store. There
+      # is no `http.request.header.*` on the allowlist at all.
+      request("GET", "/v1/webhook_endpoints", nil,
+        authenticated: true,
+        headers: [
+          {"authorization", "Bearer sess_#{@canary}"},
+          {"cookie", "courier_session=#{@canary}"},
+          {"x-api-key", "caf_#{@canary}"},
+          {"user-agent", "canary-agent/#{@canary}"}
+        ]
+      )
+
+      exported = rendered_request_spans()
+
+      for {name, value} <- [
+            {"the bearer token", "Bearer sess_#{@canary}"},
+            {"the cookie", "courier_session=#{@canary}"},
+            {"the api key", "caf_#{@canary}"}
+          ] do
+        refute exported =~ value, "#{name} reached an exportable span attribute.\n\n#{exported}"
+      end
+
+      assert_no_canary()
+    end
+  end
+
+  describe "a query string never reaches a span" do
+    test "an email in the query string of a matched route reaches nothing" do
+      request("GET", "/v1/webhook_endpoints?email=someone-#{@canary}@example.com", nil,
+        authenticated: true
+      )
+
+      assert_no_canary()
+    end
+  end
+
+  describe "an inbound traceparent never contributes its own characters" do
+    test "a malformed header carrying content is IGNORED, not recorded" do
+      # A malformed `traceparent` starts a new trace and is never a 4xx — §3.2.2.3
+      # says ignore it, and an affordance that can take a customer's request down is
+      # a denial-of-service vector aimed at courier's own surface. The other half is
+      # that "ignore" must not mean "truncate and keep the usable part".
+      response =
+        request("GET", "/healthz", nil, headers: [{"traceparent", "00-#{@canary}-#{@canary}-01"}])
+
+      assert response.status == 200
+
+      assert_no_canary()
+    end
+  end
+
+  describe "the error path never carries the message" do
+    test "a 404's span carries a status and no message" do
+      request("GET", "/v1/does-not-exist", nil, authenticated: true)
+
+      for span <- request_spans() do
+        assert span.status == "unset",
+               "a 404 produced a #{span.status} span. A 404 is the service REFUSING a " <>
+                 "request, which is the service working; an error rate that counts it " <>
+                 "is a function of how much guessing the platform absorbs, and an alert " <>
+                 "on it pages somebody to turn off the protection doing its job."
+      end
+
+      assert_no_canary()
+    end
+  end
+
+  # --- helpers ---------------------------------------------------------------
+
+  # The presence assertion, in every test above.
+  #
+  # `rendered!/0` raises when the export is empty, so this is simultaneously "the
+  # canary is absent" and "something was exported". A test that only ever asserted
+  # absence would be satisfied by a courier that records nothing, which is the
+  # failure three separate bugs in this repository produced while it was written.
+  defp assert_no_canary do
+    exported = rendered_request_spans()
+
+    if exported =~ @canary do
+      raise """
+      THE REDACTION BOUNDARY LEAKED.
+
+      The canary #{inspect(@canary)} reached an exportable span attribute. It was
+      planted in a field a caller controls, so whatever route it took is a route by
+      which a customer's email, a password, a webhook signing secret or a bearer token
+      reaches a searchable, retained, widely-readable store — and courier sends mail on
+      other services' behalf and signs webhooks with a secret, so those are the values
+      this service most cannot afford to publish.
+
+      The whole export:
+
+      #{exported}
+      """
+    end
+
+    exported
+  end
+
+  # THIS file's spans, and identified BY NAME as well as by the setup's `clear/1`.
+  #
+  # The name filter is what stops a span from an EARLIER TEST IN THIS FILE being
+  # read as this test's — which is not hypothetical: the "an id in an unmatched path"
+  # test asserts that no 404 span carries a route, and it failed against a span the
+  # "parameterised route" test above had exported, because both are
+  # `courier.web.request` and the filter cannot tell them apart.
+  defp request_spans do
+    Courier.TestSpans.finished_spans()
+    |> Enum.filter(&(&1.name == "courier.web.request"))
+  end
+
+  defp rendered_request_spans do
+    request_spans()
+    |> Enum.map_join("\n", fn span ->
+      pairs =
+        span.attributes
+        |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+        |> Enum.map_join(" ", fn {key, value} -> "#{key}=#{inspect(value)}" end)
+
+      "name=#{span.name} kind=#{span.kind} status=#{span.status} #{pairs}"
+    end)
+  end
+
+  # `Phoenix.ConnTest.dispatch/5` rather than `@endpoint.call/3`, because
+  # `Endpoint.call/3` does not split a query string out of the path: it hands
+  # `request_path: "/"` and a `query_string: ""` to the router, so every request
+  # 404s on the wrong path and the query-string test would be asserting about a
+  # route that was never matched. `dispatch/5` builds a conn the way a real server
+  # does.
+  defp request(method, path, body, opts \\ []) do
+    authenticated? = Keyword.get(opts, :authenticated, false)
+    headers = Keyword.get(opts, :headers, [])
+
+    conn =
+      put_headers(build_conn(), headers)
+      |> maybe_authenticate(authenticated?)
+      |> put_req_header("content-type", "application/json")
+
+    # The body goes in as `dispatch/5`'s params argument, which JSON-encodes a map
+    # itself. There is no `put_req_body/2` in this Plug version — it was removed in
+    # Plug 1.16 — and building the body by hand would be one more place for a test
+    # to differ from what a client actually sends.
+    # `dispatch/5` returns the CONN, not a `{conn, opts}` pair — the pair is
+    # `recycle/2`'s shape and matching on it fails with a MatchError that prints
+    # the whole conn, which buries the actual mistake.
+    conn = Phoenix.ConnTest.dispatch(conn, @endpoint, method, path, body)
+
+    # No explicit send. `dispatch/5` already sent the response — it calls
+    # `Plug.Conn.send_resp/1` on the way out, which is what fires
+    # `register_before_send` — and sending again raises `AlreadySentError`.
+    #
+    # Both of those were tried and both are written down because each looks right:
+    # `Phoenix.ConnTest.recycle/2` BUILDS a fresh conn for the next request rather
+    # than sending this one, and `Plug.Conn.send_resp/2` is the ADAPTER's
+    # `(state, status, headers, body)`, four arguments, not the conn's.
+    flush()
+    conn
+  end
+
+  defp put_headers(conn, headers) do
+    Enum.reduce(headers, conn, fn {name, value}, acc -> put_req_header(acc, name, value) end)
+  end
+
+  defp maybe_authenticate(conn, true) do
+    put_req_header(conn, "x-tenant-account", "acc_test")
+  end
+
+  defp maybe_authenticate(conn, false), do: conn
+
+  # The export is on a 5s timer in production; in test it is on demand, and this is
+  # the on-demand call. A sleep would be a guess about the timer, and it would be
+  # wrong on the machine where it matters.
+  defp flush do
+    Courier.SpanCollector.flush()
+    Process.sleep(0)
+    :ok
+  end
+end

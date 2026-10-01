@@ -70,3 +70,36 @@ config :courier, :webhook_sender, Courier.TestSupport.RecordingSender
 # default, `Courier.Principal.Reject`, authenticates nobody — see
 # `lib/courier_web/plugs/principal.ex`.
 config :courier, :principal, Courier.TestSupport.HeaderResolver
+
+# OpenTelemetry in test, and it is ON.
+#
+# The suite is where courier's redaction boundary is proved, so telemetry has to be
+# on for the proof to mean anything: an allowlist that was never exercised because
+# nothing was recorded is an allowlist nobody has checked.
+#
+# The exporter is `Courier.TestSpanExporter`, which writes into an ETS table
+# instead of dialling a collector. Three reasons, and all three are the fleet's
+# rules rather than preferences:
+#
+#   1. Nothing leaves the process. A test that dialled a collector would be a
+#      network call in a suite whose rule is no sockets, and a suite that phones an
+#      observability backend is a suite that phones an observability backend.
+#   2. It is the REAL SDK with a REAL exporter swapped in, so a test reads the
+#      payload a collector would have received rather than the test's idea of it.
+#   3. `:otel_simple_processor` rather than the batch processor, so a span is
+#      finished and exported by the time the request returns. A test that had to
+#      wait for a flush timer would need a sleep, and a sleep is a guess about
+#      someone else's interval that is wrong on the machine where it matters.
+#
+# The propagators and the sampler are set because the propagation tests need them
+# to be the same two a deployment gets. `root: :always_on` and not
+# `{:always_on, []}` — the latter is what kit's Elixir snippet says, it does not
+# match this SDK's `otel_sampler:new/1`, and the resulting `:undef` takes the whole
+# tracer provider down while its start result is discarded with `_ =`.
+config :courier, :otel_exporter, Courier.TestSpanExporter
+
+config :opentelemetry,
+  text_map_propagators: [:trace_context, :baggage],
+  sampler: {:parent_based, %{root: :always_on}},
+  register_loaded_applications: false,
+  create_application_tracers: false

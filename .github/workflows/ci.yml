@@ -199,9 +199,9 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 630
+          bin/assert-suite "$log" "whole suite (bin/prime)" 678
 
-      - name: tier — no database (258 tests, 12 files)
+      - name: tier — no database (306 tests, 15 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -226,7 +226,7 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 258
+          bin/assert-suite "$log" "no database" 306
 
       - name: tier — database (372 tests, 19 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
@@ -327,8 +327,8 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 630 passed | \`bin/assert-suite\` |"
-            echo "| no database, 12 files | 258 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 678 passed | \`bin/assert-suite\` |"
+            echo "| no database, 15 files | 306 passed | tier step |"
             echo "| database, 19 files | 372 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
