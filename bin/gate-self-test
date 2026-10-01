@@ -212,6 +212,38 @@ echo "  declaration: gate.yml"
 echo "  checker:     ${gatecheck#"$core"/}  (core at $core)"
 echo
 
+# A dirty worktree makes the control RED, and it needs saying before the control
+# rather than after a failure line that looks like a broken declaration.
+#
+# `make_copy/1` copies `git ls-files`, so the copy holds **tracked files only** —
+# which is the point (the copy is what a CI checkout would get, so a breakage
+# proves the checks work on committed state). The cost is that an untracked
+# module a tracked file references is missing from the copy, and the gate then
+# dies at boot with something like `the module Courier.ErrorRelay was given as a
+# child to a supervisor but it does not exist`. That is a *dirty tree*, not a bad
+# declaration, and the two are indistinguishable from the failure line alone.
+#
+# `gate.yml` itself is already handled by `make_copy/1`'s explicit `cp`, which is
+# why the comment there says "untracked until this packet is committed". This is
+# the same problem for every other new file, and it is reported rather than
+# silently working around: `git add -A` and re-run.
+dirty="$(git -C "$repo" status --porcelain | grep -v '^?? ' || true)"
+if [ -n "$dirty" ]; then
+  printf 'warn the worktree has MODIFIED TRACKED files; the copy takes committed\n'
+  printf 'warn state from git ls-files, so the control runs against a different\n'
+  printf 'warn tree than the one you are reading. Staged or committed, re-run.\n'
+  printf '%s\n' "$dirty" | sed 's/^/warn   /'
+  printf '\n'
+fi
+
+untracked="$(git -C "$repo" status --porcelain | grep '^?? ' || true)"
+if [ -n "$untracked" ]; then
+  printf 'warn UNTRACKED files below are NOT in the copy, and the control runs the\n'
+  printf 'warn real gate in it. If it fails with a missing module, this is why:\n'
+  printf '%s\n' "$untracked" | sed 's/^/warn   /'
+  printf 'warn stage or commit them (git add -A) and re-run.\n\n'
+fi
+
 # ---------------------------------------------------------------------------
 # THE CONTROL. Two phases, and the second one runs courier's real gate.
 # ---------------------------------------------------------------------------

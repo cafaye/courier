@@ -199,9 +199,17 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 678
+          bin/assert-suite "$log" "whole suite (bin/prime)" 772
+      #
+      # Measured on the MERGED tree of the observability and error-reporting
+      # packets, from a complete run, and the tiers are the point of recording
+      # it: neither incoming number described this tree. Whole suite 772. The
+      # no-database tier moved 306 -> 351 because the error-reporting tests join
+      # the observability tests there, and the DATABASE TIER DID NOT MOVE at 421
+      # across three packets, because not one of them touches `Courier.Repo` —
+      # which is exactly what that tier is a count of.
 
-      - name: tier — no database (306 tests, 15 files)
+      - name: tier — no database (351 tests, 17 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -209,6 +217,12 @@ jobs:
         # table included. The file list is derived from the case templates
         # rather than written out, so a new test file cannot fall outside its
         # tier, and an empty list is a hard error rather than a whole-suite run.
+        # `error_relay_test.exs` and `error_relay/policy_test.exs` are in this
+        # tier and that is the *claim* the error-reporting packet makes: the relay
+        # holds no `Repo` and adds no migration, so the redaction boundary can be
+        # tested with no database at all. `CourierWeb.ErrorReportingTest` is in
+        # the other tier because it stops `Courier.Repo` under the application
+        # supervisor to prove the same thing from the other side.
         run: |
           set -euo pipefail
           grep -rLE 'use (Courier\.DataCase|CourierWeb\.ConnCase)' test --include='*_test.exs' |
@@ -226,9 +240,9 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 306
+          bin/assert-suite "$log" "no database" 351
 
-      - name: tier — database (372 tests, 19 files)
+      - name: tier — database (421 tests, 21 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
         # and therefore through the Ecto SQL sandbox: the SQL layer, the
         # migrations `mix ecto.setup` applies, Oban's tables, and the
@@ -252,7 +266,7 @@ jobs:
             echo "::error::the database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "database" 372
+          bin/assert-suite "$log" "database" 421
 
       - name: tier — the SSRF table (62 tests, in-memory resolver)
         # courier-03's table, run on its own so the log carries a line that can
@@ -327,9 +341,9 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 678 passed | \`bin/assert-suite\` |"
-            echo "| no database, 15 files | 306 passed | tier step |"
-            echo "| database, 19 files | 372 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 772 passed | \`bin/assert-suite\` |"
+            echo "| no database, 17 files | 351 passed | tier step |"
+            echo "| database, 21 files | 421 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
             echo "| mix.lock | no diff after the gate | lockfile step |"

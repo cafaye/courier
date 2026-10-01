@@ -18,6 +18,24 @@ import Config
 # script that automatically sets the env var above.
 if System.get_env("PHX_SERVER") do
   config :courier, CourierWeb.Endpoint, server: true
+
+  # **Both** endpoints, and the second one is not a copy-paste error. The error
+  # endpoint declares `server: false` in `config/config.exs` so that a
+  # `mix test` run and a `mix phx.server` run do not bind a second listener, which
+  # is the right default; but a release that serves the customer API and does not
+  # serve the ingest surface is a relay with no door.
+  #
+  # This is release-only breakage in the same family as the `Sentry` child-spec
+  # mistake in `Courier.Application`: nothing in the suite runs a release, and the
+  # symptom is a single log line —
+  #
+  #     Configuration :server was not enabled for CourierWeb.ErrorEndpoint,
+  #     http/https services won't start
+  #
+  # — which reads like a notice and leaves the relay silently unreachable. It is
+  # better than a boot crash and worse than a boot failure, which is the worst
+  # combination to debug from a container log.
+  config :courier, CourierWeb.ErrorEndpoint, server: true
 end
 
 config :courier, CourierWeb.Endpoint,
@@ -136,6 +154,98 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "example.com"
 
   config :courier, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
+
+  # ---------------------------------------------------------------------------
+  # Error reporting and the error relay. Both are read here, out of the
+  # environment, and **neither is required** — see the reasoning, because a
+  # required-looking omission is the thing that surprises an operator.
+  #
+  # `COURIER_ERROR_REPORTING_DSN` — courier's **own** failures, to its own relay.
+  # Unset, courier does not report its own errors and says nothing at boot; that
+  # is a diagnosable state (`ErrorReporting.enabled?/0` is false, and
+  # `Courier.ErrorRelay.stats/1` shows `forwarded: 0` with nothing arriving
+  # anywhere). It is not required because the error store is an *observability*
+  # control, and a courier that refuses to boot because its error store is
+  # unreachable has turned a missing integration into an outage — see
+  # `Courier.ErrorRelay.Sink.Noop`, which documents the same decision at length.
+  #
+  # `COURIER_ERROR_RELAY_TOKEN` — the shared secret on the **ingest** surface,
+  # and this one **is** required, because with no token the surface has no way to
+  # tell a service from anybody else, and a default would be a shared secret in
+  # version control that every deployment which forgot to set one would accept
+  # error reports from. The same rule as `COURIER_SECRET_BOX_KEY` above, and for
+  # the same reason: a default is a key in git.
+  #
+  # `COURIER_ERROR_SINK_DSN` — the relay's own destination, a GlitchTip DSN. This
+  # is a **credential** (it carries the project's public ingest key) and is never
+  # logged: `Courier.ErrorRelay.Sink.Req` parses it at boot and every refusal it
+  # reports is a symbol. Unset, the relay runs with `Sink.Noop` and counts what it
+  # discards, which is the same diagnosable-not-fatal shape as above.
+  #
+  # `COURIER_RELEASE` and `DEPLOYMENT_ENVIRONMENT` are **not** invented here. The
+  # release is the build's own identity and the environment is deployment
+  # configuration; an operator sets them, and the same value has to reach the
+  # traces, so it is read once and stamped on both. Auto-resolution on deploy
+  # (GlitchTip resolves an issue when a release that contains the fix ships) is
+  # the reason the release is on the event at all: without it the store has no way
+  # to know a crash stopped, and an issue stays open for ever.
+  # ---------------------------------------------------------------------------
+  error_reporting_dsn = System.get_env("COURIER_ERROR_REPORTING_DSN")
+  error_relay_token = System.get_env("COURIER_ERROR_RELAY_TOKEN")
+  error_sink_dsn = System.get_env("COURIER_ERROR_SINK_DSN")
+  release = System.get_env("COURIER_RELEASE") || "unknown"
+  environment_name = System.get_env("DEPLOYMENT_ENVIRONMENT") || "production"
+
+  if error_reporting_dsn do
+    config :courier, :error_reporting,
+      enabled: true,
+      dsn: error_reporting_dsn,
+      release: release,
+      environment: environment_name
+
+    # The SDK's own configuration, and the DSN is courier's **relay** and not a
+    # third party. `before_send` is the second redaction barrier and it is what
+    # makes a DSN misconfiguration survivable: see
+    # `Courier.ErrorReporting.Filter`, whose moduledoc is the argument.
+    config :sentry,
+      dsn: error_reporting_dsn,
+      environment_name: environment_name,
+      release: release,
+      before_send: {Courier.ErrorReporting.Filter, :before_send},
+      send_default_pii: false,
+      request_timeout: 3_000,
+      pool_size: 5,
+      hackney: [recv_timeout: 3_000]
+  end
+
+  if is_nil(error_relay_token) do
+    raise """
+    environment variable COURIER_ERROR_RELAY_TOKEN is missing.
+
+    It is the shared secret every service presents when it reports an unhandled
+    error. Generate one with: openssl rand -hex 32
+
+    Unset, the relay refuses every envelope, which is the safe direction — but a
+    deployment that means to run the relay and does not have one is silently
+    reporting nothing, so this is refused at boot rather than discovered by an
+    operator reading a dashboard.
+    """
+  end
+
+  config :courier, :error_relay_token, error_relay_token
+
+  config :courier, :error_relay,
+    name: Courier.ErrorRelay,
+    sink: Courier.ErrorRelay.Sink.Req,
+    sink_dsn: error_sink_dsn,
+    # A burst of five then one per class per minute. The defaults are small on
+    # purpose: Sentry does not sample errors by design, so this is the volume
+    # control the SDK deliberately does not provide, and the same numbers are set
+    # in each of the three services so one config file describes the fleet.
+    burst: 5,
+    per_minute: 60,
+    capacity: 4_096,
+    queue_size: 256
 
   config :courier, CourierWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],

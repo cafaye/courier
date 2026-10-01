@@ -87,6 +87,100 @@ config :courier, :webhooks,
 # check never depends on what a real resolver says about a real name.
 config :courier, :dns_resolver, Courier.Webhooks.Dns.System
 
+# ---------------------------------------------------------------------------
+# Error reporting and the error relay. Both OFF by default here; the environment
+# files and `runtime.exs` decide.
+#
+# WHY BOTH ARE OFF IN `config.exs` RATHER THAN IN `dev.exs`
+#
+# Because "off" is the safe default for the *whole* tree, and a reader who opens
+# this file should not have to know which of three files to check. A courier that
+# starts and silently reports nothing is a diagnosable state; a courier that
+# starts in dev and reports to a developer's machine is not, and the difference
+# between the two is one line of configuration.
+#
+# `:error_reporting` is courier reporting **its own** failures. Its DSN points at
+# courier's own relay and at nothing else — see the licence argument in `mix.exs`
+# and the misconfiguration argument in `Courier.ErrorReporting.Filter`, which is
+# why the SDK filters its own events even though the relay filters them again.
+#
+# `:error_relay` is courier **receiving** the other two services' failures. Its
+# token is required rather than defaulted, for the same reason
+# `COURIER_SECRET_BOX_KEY` is: a default would be a shared secret in version
+# control that every deployment which forgot to set one would accept error
+# reports from.
+# ---------------------------------------------------------------------------
+config :courier, :error_reporting,
+  enabled: false,
+  environment: "unknown",
+  release: "unknown",
+  dsn: nil
+
+config :courier, :error_relay, []
+
+# The Sentry SDK's own configuration.
+#
+# `before_send` is the second redaction barrier, and it is the reason this
+# deployment is safe from its own misconfiguration:
+# `Courier.ErrorReporting.Filter` applies the same allowlist the relay does,
+# before the envelope exists, so a DSN pointed at a third party by mistake still
+# cannot ship an exception message or a request URL.
+#
+# `send_default_pii` is off in every Sentry SDK by default and is **stated**
+# rather than assumed, because it is the one line whose default an SDK upgrade
+# could plausibly change and whose change is invisible in a diff.
+#
+# No `sample_rate`. Sentry does not sample errors by design, and volume control is
+# built in two places this repository owns instead — the client-side limiter and
+# `Courier.ErrorRelay`'s fingerprint throttle. A sample rate here would silently
+# discard the one crash that mattered.
+#
+# The transport is the SDK's own business and is left alone: this repository has a
+# rule about HTTP clients (`AGENTS.md`: Req, not httpoison/tesla/httpc) and that
+# rule is about code *this* repository writes. The SDK's traffic goes to
+# courier's relay on the compose network; the relay's traffic to GlitchTip goes
+# through Req, which is this repository's client. The two timeouts are set because
+# a hung ingest socket must not be able to hold a request open — the relay
+# answers before anything is forwarded, and this is the second place that has to
+# be true.
+config :sentry,
+  dsn: nil,
+  before_send: {Courier.ErrorReporting.Filter, :before_send},
+  send_default_pii: false,
+  request_timeout: 3_000,
+  pool_size: 5,
+  hackney: [recv_timeout: 3_000]
+
+# The error endpoint's listener. A separate port from the customer API, and not
+# published by `docker-compose.yml`, for the reason
+# `CourierWeb.ErrorEndpoint` gives: the ingest surface is authenticated by a
+# shared secret rather than by a per-caller principal, so it does not belong on
+# the port a customer's ingress publishes.
+config :courier, CourierWeb.ErrorEndpoint,
+  http: [ip: {0, 0, 0, 0}, port: 4003],
+  adapter: Bandit.PhoenixAdapter,
+  # `formats: []` and the endpoint then **cannot render an error at all**:
+  # `Phoenix.Endpoint.RenderErrors.put_formats/2` raises `MatchError` on the empty
+  # list, and the request answers with a bare 500 that carries no body and no
+  # content-type. A surface that swallows its own failures is the one thing an
+  # error-reporting endpoint must not be — the exception is logged by the handler
+  # and the caller learns only that something failed.
+  #
+  # `CourierWeb.ErrorJSON` is therefore configured, exactly as the customer API's
+  # endpoint is, and the controller's own refusals use `CourierWeb.Problem` so the
+  # shape a caller sees is the same `problem+json` it gets everywhere else in
+  # courier. One envelope renderer for the whole service, not one per endpoint.
+  render_errors: [formats: [json: CourierWeb.ErrorJSON], layout: false],
+  pubsub_server: Courier.PubSub,
+  # OFF here, and ON in `config/runtime.exs` when `PHX_SERVER` is set — the same
+  # arrangement the customer endpoint uses, and for the same reason: `mix test` and
+  # `mix phx.server` must not bind a second listener. The asymmetry to watch is
+  # that the customer's port is published by compose and this one is not, so a
+  # missing `server: true` here does not show up as a refused connection on
+  # localhost: it shows up as a relay nothing can reach, plus one log line that
+  # reads like a notice. `runtime.exs` sets both in the same block on purpose.
+  server: false
+
 # Configure the endpoint
 config :courier, CourierWeb.Endpoint,
   url: [host: "localhost"],

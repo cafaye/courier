@@ -9,6 +9,7 @@ config :courier, Courier.Repo,
   username: "postgres",
   password: "postgres",
   hostname: "localhost",
+  port: String.to_integer(System.get_env("COURIER_TEST_PG_PORT", "5432")),
   database: "courier_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
@@ -103,3 +104,36 @@ config :opentelemetry,
   sampler: {:parent_based, %{root: :always_on}},
   register_loaded_applications: false,
   create_application_tracers: false
+
+# ---------------------------------------------------------------------------
+# Error reporting is OFF in test, and that is a fact this repository asserts.
+#
+# Two things are switched off and they are switched off in different places on
+# purpose:
+#
+#   * `:sentry`'s DSN is unset (config/config.exs, inherited), so
+#     `Sentry.capture_exception/2` builds nothing and sends nothing. The SDK
+#     treats a nil DSN as "do not report", so this is the switch that matters.
+#   * `Courier.ErrorReporting.enabled?/0` is false, so courier does not even call
+#     the SDK.
+#
+# `CourierWeb.ErrorReportingTest` asserts both, and asserts that capturing an
+# error in the suite puts nothing in any mailbox and opens no socket. "Reporting
+# is off in test" is a requirement in the brief, and a requirement nobody checks
+# is a requirement that holds until somebody adds a DSN to `test.exs` on a Friday
+# afternoon — at which point every test that raises an expected exception
+# reports it, and the suite takes minutes and a network.
+#
+# The relay is configured too, so the *receiving* half of the packet is exercised
+# in the suite — `Courier.TestSupport.RecordingSink` stands in for GlitchTip, and
+# `COURIER_ERROR_RELAY_TOKEN` is a test-only value in the repository on the same
+# terms as `COURIER_SECRET_BOX_KEY` above: a fixture, not a default, and
+# `config/runtime.exs` requires a real one in prod and refuses to boot without it.
+config :courier, :error_reporting, enabled: false
+config :sentry, dsn: nil
+
+config :courier, :error_relay_token, "test-error-relay-token-not-a-secret"
+
+config :courier, CourierWeb.ErrorEndpoint,
+  http: [ip: {127, 0, 0, 1}, port: 4003],
+  server: false

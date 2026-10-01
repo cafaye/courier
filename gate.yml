@@ -92,6 +92,15 @@ gate:
       # growing repository and this floor is a ratchet that is meant to be
       # raised as the suite grows, not a target the suite must hit.
       #
+      # Remeasured on the MERGED tree of the observability and error-reporting
+      # packets: 772 whole-suite tests, so 766 with the same deliberate margin of
+      # 6 that 672 held against a measured 678. Neither incoming number described
+      # this tree — the observability packet measured 678 on a branch that did
+      # not carry the error-reporting tests, and the error-reporting packet
+      # measured 724 on a branch that did not carry the observability tests. A
+      # floor is a claim about the tree it lives in, so it is measured on the
+      # tree it lives in.
+      #
       # The previous value here was 624 against a measured 630, raised by the
       # observability packet in the same commit that added its 62 tests — 18 of
       # them asserting the span-attribute allowlist, 9 planting a canary in every
@@ -106,7 +115,7 @@ gate:
       # same way and in the same run; the `database` tier did not move because not
       # one of the 62 new tests touches `Courier.Repo`, which is what the tier is
       # a count of.
-      minimum: 672
+      minimum: 766
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres

@@ -56,6 +56,38 @@ lib/courier/webhooks/sender/req.ex    the Req implementation that ships
 lib/courier/workers/process_outbox_worker.ex  the relay itself
 lib/courier/workers/dispatch_webhooks_worker.ex  outbox event -> delivery rows
 lib/courier/workers/deliver_webhook_worker.ex    due delivery -> signed POST
+lib/courier/error_reporting.ex        the SDK seam: capture/3, capture_any/3,
+                                      enabled?/0, allowed?/1
+lib/courier/error_reporting/filter.ex the SDK's before_send: the first barrier
+lib/courier/error_relay.ex            the fleet's redaction chokepoint: the
+                                      throttle, the counters, the ingest entry
+lib/courier/error_relay/policy.ex     the allowlists, the blocked values, the
+                                      error.type vocabulary, the fingerprint
+lib/courier/error_relay/sender.ex     the bounded queue and its brutal-kill drain
+lib/courier/error_relay/sink.ex       Sentry envelope framing, both directions
+lib/courier/error_relay/sink/req.ex   the sink that ships, one attempt, no retry
+lib/courier/error_relay/sink/noop.ex  the sink that counts what it discards
+lib/courier_web/error_endpoint.ex     the ingest listener, on its own port
+lib/courier_web/error_router.ex       /api/:project_id/envelope/, and the probe
+lib/courier_web/controllers/error_envelope_controller.ex    one envelope, in
+lib/courier_web/controllers/error_envelope_health_controller.ex  the relay's
+lib/courier_web/plugs/ingest_token.ex the shared secret, from X-Sentry-Auth
+test/courier/error_relay/policy_test.exs the allowlists, the canaries, the
+                                      vocabulary, and the fingerprint
+test/courier/error_relay_test.exs      the throttle, the counters, and the
+                                      end-to-end boundary on the stored bytes
+test/courier_web/error_reporting_test.exs  the SDK-side filter: a canary that
+                                      fails the test if it ever reaches an event
+test/courier_web/error_relay_endpoint_test.exs  the ingest surface: the token,
+                                      the route an SDK actually derives, and
+                                      the SDK's own framing
+test/support/clock.ex                 the relay's injected clock, for throttle tests
+test/support/recording_sink.ex        a sink that records envelopes instead of
+                                      forwarding them
+test/support/failing_sink.ex          a sink that raises, for the queue's drain
+test/support/sentry_test_client.ex    the SDK's transport, pointed at a test sink
+                                      and its own database on the SAME postgres
+ops/glitchtip-database.sql            the store's role and database, idempotent
 lib/courier_web/problem.ex            core's problem+json envelope, built once
 lib/courier_web/plugs/trace.ex        a trace id and the path, for every request
 lib/courier_web/plugs/parse_body.ex   Plug.Parsers, with courier's 400

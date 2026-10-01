@@ -14,6 +14,39 @@ document lands in both files in one commit, because core asserts the two agree.
 
 ### Added
 
+- **courier reports errors, and the report cannot carry what a redaction boundary
+  exists to keep out of one.** Error reports carry request context, so they are a
+  second path by which a credential, a prompt or a piece of PII could leave the
+  process — the same leak the span pipeline was built to prevent, arriving by a
+  different door. Two independent barriers, because the realistic failure is one
+  of them being removed by a well-meaning change and nobody noticing for a month.
+  - **`Courier.ErrorReporting.Filter` is the SDK-side barrier** and runs as
+    Sentry's `before_send`. It is **fail-closed**: an event it cannot read is an
+    event courier does not report. Losing a crash is recoverable; a customer
+    credential in a third party's index is not.
+  - **`Courier.ErrorRelay.Policy` is the relay-side barrier**, the single
+    chokepoint every event passes on its way to the store. The exception
+    **message** goes, and so do the frame **variables** — which in Elixir are the
+    function arguments.
+  - **The relay enqueues, it does not send.** A slow or dead error store cannot
+    become courier's latency or courier's outage; the queue is bounded, and
+    dropping under pressure is counted rather than silently absorbed.
+  - **The store is self-hosted GlitchTip, over the Sentry envelope protocol.**
+    Not self-hosted Sentry, whose FSL-1.1 forbids using it as the engine of a
+    commercial offering. GlitchTip's backend and frontend are MIT, so hosted
+    error reporting carries no copyleft obligation.
+  - **A deployment is the leak this exists to close.** A service whose DSN points
+    at `sentry.io` rather than at courier's relay never reaches the policy at
+    all, so the SDK-side filter is deliberately kept even though it is thin.
+  - **`COURIER_ERROR_RELAY_TOKEN` is required in prod**, compared with
+    `Plug.Crypto.secure_compare/2`, and every refusal logs an atom
+    (`:no_token`, `:wrong_token`, `:no_token_configured`) — never the value
+    presented.
+  - **Reporting is off in test** and that is asserted rather than assumed:
+    `CourierWeb.ErrorReportingTest` proves capturing an error puts nothing in any
+    mailbox and opens no socket. The *receiving* half is still exercised, with a
+    recording sink standing in for GlitchTip.
+
 - **courier emits OpenTelemetry spans, into the collector that ships with kit's
   stack.** `<SERVICE>_OTEL_ENDPOINT` is the only contract (core D16) and it is
   **on by default** — unset, it is `http://otel-collector:4318` — so a developer
