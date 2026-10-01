@@ -8,6 +8,14 @@ defmodule Courier.MixProject do
       elixir: "~> 1.17",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      # MIT, and the `files:` list is what makes the grant travel. Without a
+      # `package` block Hex refuses to publish, and without `files:` the LICENSE
+      # file is not in the tarball even once it can — so the licence would be a
+      # fact about the repository and not about the package a consumer installs.
+      # MIT is fleet-wide: the platforms are consumed as a dependency graph
+      # through a service registry, and copyleft would make every downstream
+      # consumer inherit an obligation, which defeats the registry model.
+      package: package(),
       # The coverage tool, named here rather than discovered at run time.
       # `mix test --cover` writes `cover/` and enforces nothing; this is what
       # makes `mix coveralls --minimum-coverage` work, which is the command both
@@ -16,6 +24,32 @@ defmodule Courier.MixProject do
       aliases: aliases(),
       deps: deps(),
       listeners: [Phoenix.CodeReloader]
+    ]
+  end
+
+  # The Hex package metadata.
+  #
+  # `licenses:` is the SPDX identifier and `files:` is the list that goes into
+  # the tarball. Both are needed and neither is implied by the other: `licenses:`
+  # without `files:` publishes a package carrying no licence text at all, which
+  # is the state this whole change exists to end.
+  #
+  # `LICENSE` is in `files:` explicitly rather than by glob. A glob that stopped
+  # matching would publish successfully and quietly drop the grant, and a licence
+  # that goes missing at publish time is the one failure mode here that nothing
+  # else would catch.
+  defp package do
+    [
+      licenses: ["MIT"],
+      files: [
+        "lib",
+        "priv",
+        "mix.exs",
+        "README.md",
+        "LICENSE",
+        "CHANGELOG.md",
+        ".formatter.exs"
+      ]
     ]
   end
 
