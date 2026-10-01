@@ -32,6 +32,22 @@ courier-*.tar
 .env.*
 !.env.example
 
+# Kamal's secrets, and ONLY that.
+#
+# `config/deploy.yml` names a dozen credentials — DATABASE_URL,
+# COURIER_SECRET_BOX_KEY, RESTIC_PASSWORD, the R2 pair — and `kamal init` writes
+# their VALUES into `.kamal/secrets` on the operator's machine. Every name in
+# that directory is a credential, and `RESTIC_PASSWORD` is the one value that
+# makes the entire backup repository readable or not, so an unignored `.kamal/`
+# is a `git add -A` away from publishing the key that opens every snapshot.
+#
+# The trailing slash matters in the other direction: `.kamal/hooks/` is where a
+# Kamal 2 pre-deploy hook lives, and a hook is a committed script rather than a
+# secret. Ignoring the directory wholesale would make that file invisible to
+# `git add`, so the ignore is narrowed to the two files Kamal actually writes.
+.kamal/secrets
+.kamal/secrets-*
+
 # ElixirLS build artifacts.
 .elixir_ls
 

@@ -199,53 +199,51 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 1128
+          bin/assert-suite "$log" "whole suite (bin/prime)" 1150
       #
-      # Remeasured on the tree carrying the inbound provider surface
-      # (`POST /inbound/resend`): whole suite 1134, which is 561 with no database
-      # and 573 with one. BOTH tiers moved, and they moved for OPPOSITE reasons,
-      # which is what makes the pair worth recording rather than just the total.
+      # Remeasured on the tree carrying `config/kamal-backup.yml` and
+      # `config/deploy.yml`: whole suite 1156, which is 577 with no database and
+      # 579 with one. The 22 added by the backup packet split 16 / 6, and the
+      # split IS the claim rather than an accident:
       #
-      # **The no-database tier grew by 26** across three files, and it grew by
-      # construction rather than by coincidence:
+      # **The no-database tier grew by 16** from
+      # `test/courier/backup_config_test.exs`, which reads two files from disk and
+      # touches no `Courier.Repo`. That placement is the point and not a
+      # convenience: it holds the CROSS-FILE contract — every secret
+      # `config/kamal-backup.yml` names must be in the `backup` accessory's
+      # `env.secret` list, which `kamal-backup validate` builds from that list and
+      # from nothing else — and a backup configuration that could only be checked
+      # against a live postgres would be one a database-less runner silently skips.
+      # It is also in the tier that proves `mix test` executing zero tests on a
+      # runner with no database is caught, which is the tier's reason to exist.
       #
-      #   * `plugs/parse_body_test.exs` is the proof that the security property is
-      #     MECHANICAL rather than a convention. It asserts that an unauthenticated
-      #     body is never decoded — the claim that made `CourierWeb.Plugs.ParseBody`
-      #     skip the inbound path — and it does that with two functions and a
-      #     `Plug.Conn`, so it needs no postgres and could not have made the claim
-      #     any other way. The subject grew, so the tier that counts files which
-      #     never touch `Courier.Repo` grew.
-      #   * `inbound_config_test.exs` is two config reads and their shapes.
-      #   * `router_test.exs` grew six route assertions, also no database.
+      # **The database tier grew by 6** from
+      # `test/courier/backup_tables_test.exs`, a `Courier.DataCase` because its
+      # subject is the SCHEMA: it reads `information_schema` on the connected
+      # database to check what a `pg_dump` would carry. "courier keeps nothing on
+      # local disk" is a claim about courier's COLUMNS, and asserting it from the
+      # comment beside `paths:` would be asserting the comment. The day somebody
+      # adds a `bytea` column or a `storage_key`, that test goes red and README's
+      # "what this does not cover" section has to be rewritten — which is the
+      # mechanism, not the intention.
       #
-      # **The database tier grew by 35**, and the reason matters more here than the
-      # number. `controllers/inbound_controller_test.exs` is a `CourierWeb.ConnCase`
-      # because its central claim is about ROWS — "an unsigned but perfectly
-      # well-formed bounce is refused and records nothing" — which is a claim a
-      # mock cannot hold, for the same reason `test/courier/inbound_test.exs` is a
-      # `Courier.DataCase`. And its positive half is a JOIN: it really sends a
-      # message through `POST /v1/messages`, takes the `message_id` the provider
-      # would have quoted, and asserts the published event carries the `user_id`
-      # and `notification_type` of **that send**. That is two tables, and no
-      # assertion short of the real ones can hold it.
-      #
-      # 1134 is also 561 + 573, which is the consistency check worth making: a
+      # 1156 is also 577 + 579, which is the consistency check worth making: a
       # whole suite that is not the sum of its own tiers is a suite where a file
       # has been left out of both.
       #
-      # The previous value here was 1073 (535 + 538), measured on the MERGED tree
-      # carrying `Courier.Inbound` and `Courier.Events`, and before that 918, which
-      # is the number the send-surface packet moved from. 918 was in turn measured
-      # rather than copied forward — and the packet before it recorded that the
-      # suppression packet (90d95f7) added 31 database tests and raised NOTHING
-      # here, so the `database` floor said 421 while the tier actually held 452.
-      # That is the failure mode of a floor nobody re-measures: the floor stayed
-      # green because it is a decrease detector, while the labels above it quietly
-      # stopped describing the tree. Both were wrong and only one of them would have
-      # failed a build.
+      # The previous value here was 1134 (561 + 573) on the tree carrying the
+      # inbound provider surface, and before that 1073 (535 + 538), measured on the
+      # MERGED tree carrying `Courier.Inbound` and `Courier.Events`, and before
+      # that 918, which is the number the send-surface packet moved from. 918 was
+      # in turn measured rather than copied forward — and the packet before it
+      # recorded that the suppression packet (90d95f7) added 31 database tests and
+      # raised NOTHING here, so the `database` floor said 421 while the tier
+      # actually held 452. That is the failure mode of a floor nobody re-measures:
+      # the floor stayed green because it is a decrease detector, while the labels
+      # above it quietly stopped describing the tree. Both were wrong and only one
+      # of them would have failed a build.
 
-      - name: tier — no database (561 tests, 24 files)
+      - name: tier — no database (577 tests, 25 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -276,9 +274,9 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 561
+          bin/assert-suite "$log" "no database" 577
 
-      - name: tier — database (573 tests, 27 files)
+      - name: tier — database (579 tests, 28 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
         # and therefore through the Ecto SQL sandbox: the SQL layer, the
         # migrations `mix ecto.setup` applies, Oban's tables, and the
@@ -302,7 +300,7 @@ jobs:
             echo "::error::the database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "database" 573
+          bin/assert-suite "$log" "database" 579
 
       - name: tier — the SSRF table (62 tests, in-memory resolver)
         # courier-03's table, run on its own so the log carries a line that can
@@ -377,9 +375,9 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 1134 passed | \`bin/assert-suite\` |"
-            echo "| no database, 24 files | 561 passed | tier step |"
-            echo "| database, 27 files | 573 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 1156 passed | \`bin/assert-suite\` |"
+            echo "| no database, 25 files | 577 passed | tier step |"
+            echo "| database, 28 files | 579 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
             echo "| mix.lock | no diff after the gate | lockfile step |"

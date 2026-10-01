@@ -21,6 +21,114 @@ test`. It needs a Postgres at `localhost:5432` as `postgres`/`postgres` —
 Before committing a change, `mix precommit`: warnings-as-errors, unused deps
 dropped from the lockfile, formatted, suite green.
 
+## Backups
+
+```sh
+kamal accessory boot backup
+kamal accessory exec --reuse backup kamal-backup backup --force
+bin/drill --table notification_preferences --table webhook_endpoints
+```
+
+`config/kamal-backup.yml` says what is backed up and
+`config/deploy.yml` carries the `backup` accessory that reads it. The two are one
+contract: every secret the first names must be in the second's `env.secret`
+list, and `test/courier/backup_config_test.exs` fails if the mount or the
+overlap is ever broken. The full procedure — and the drill, which is the step
+that proves the rest — is in
+[kit's backup and restore runbook](https://github.com/cafaye/docs/blob/master/src/content/docs/runbooks/backup-and-restore.md).
+
+**What is in the backup: one Postgres database, dumped with `pg_dump`, written
+to restic in a Cloudflare R2 bucket you choose.** courier owns exactly one
+database and every one of its tables is content, so the backup is the whole of
+courier's durable state:
+
+| Table | What losing it costs |
+| --- | --- |
+| `notification_preferences` | every tenant's answer about every notification type — the first thing a customer notices |
+| `webhook_endpoints` | every account's URL **and its signing secret** |
+| `webhook_deliveries` | the attempt log, including where each endpoint is in its retry budget |
+| `outbox_events` | the CloudEvents envelopes courier published, and the relay's own claim query |
+| `email_suppressions` | the suppression list — the mailboxes that said no |
+| `idempotency_keys` | stored responses, so a replayed `POST` returns the first answer instead of mailing twice |
+| `oban_jobs` | the relay's queue |
+
+### What it does NOT cover
+
+Stating this is the part that matters, because a backup that is believed to cover
+more than it does is worse than none.
+
+- **Object storage, and anything held in it.** There is none today — courier has
+  no bucket, no attachment table and no `bytea` column for uploaded content —
+  which is also why `config/kamal-backup.yml` declares **no `paths:` key** and no
+  file snapshot is ever taken (`latest_file_backup: null` in `evidence` is the
+  correct answer, not a gap). `test/courier/backup_tables_test.exs` reads
+  `information_schema` on every run and fails if a column appears that holds file
+  bytes or points at bytes held elsewhere, because the day that happens the
+  missing `paths:` becomes a real hole and this paragraph becomes a lie.
+- **Anything in a container's ephemeral filesystem.** Deliberately nothing: the
+  release writes nothing to a volume and holds no data volume, so there is
+  nothing there to lose.
+- **Postgres roles and tablespaces.** The dump is one database with no ownership,
+  so the role comes from how the `postgres` accessory was provisioned. Restoring
+  into a differently-named role means that role has to exist first.
+- **The sealing key, and this is the one that matters most.** A restic repository
+  is encrypted with `RESTIC_PASSWORD` and nothing else, so **losing that makes
+  every snapshot permanently unreadable** — including the ones you have not lost
+  yet. It is a different value from any credential courier uses and it is the one
+  worth writing down twice, somewhere other than the bucket.
+
+  courier additionally seals every `webhook_endpoints.secret` under
+  `COURIER_SECRET_BOX_KEY` with AES-256-GCM
+  (`Courier.SecretBox`), and that key **cannot** be in the backup: it is not in
+  the database — `config/runtime.exs` refuses to boot without it — so it cannot
+  be in a dump of the database. **So a restore brings every signing secret back as
+  ciphertext, and courier cannot read its own rows until that key is supplied
+  unchanged.** The rows come back; the ability to sign with them does not. Keep
+  `COURIER_SECRET_BOX_KEY` and `RESTIC_PASSWORD` outside the restic repository —
+  [secret rotation](https://github.com/cafaye/docs/blob/master/src/content/docs/runbooks/secret-rotation.md)
+  is where they belong. Losing `COURIER_SECRET_BOX_KEY` means every stored secret
+  has to be re-issued to its customer, because the plaintext cannot be recovered
+  from the ciphertext.
+
+### The data-loss window, stated honestly
+
+**A scheduled dump is not point-in-time recovery.** With the shipped
+`backup.schedule: 1d`:
+
+- **Up to 24 hours of committed transactions are lost** if the database is
+  destroyed. That is the number to quote to a customer.
+- The 24 hours is measured **from when the previous backup finished**, not to a
+  wall-clock deadline. The scheduler's loop is *run a backup, then sleep the
+  interval*, so one cycle is the interval **plus that run's duration** — and
+  because `pg_dump` opens a single repeatable-read transaction, the snapshot is
+  taken at the **start** of the dump. The gap between two snapshot points is that
+  whole cycle and is never exactly 24 hours.
+- **A failed backup is not retried until the next interval.** The loop catches
+  the failure, logs it, and sleeps. A dump failing for six hours has not been
+  retried six times. Run `kamal-backup backup` by hand and it retries
+  immediately — which is why **the alert is the backup**: if you are not watching
+  the accessory's log, a nightly failure is invisible for a day.
+- There is **no WAL shipping and no base backup**. If 24 hours is unacceptable for
+  your tenants, the next step is Postgres's own continuous archiving, which is an
+  infrastructure decision rather than a config one — and `kamal-backup` will not
+  do it for you.
+- Retention bounds how far back a restore reaches: roughly 26 snapshots, the
+  oldest about a year, the newest up to a day old. **R2 has no object versioning
+  and no Object Lock**, so a snapshot `prune` deletes is gone.
+
+### Adopting it
+
+Nothing runs until the accessory is booted and the four secrets exist. The
+deploy config is committed; the values are not — `.kamal/secrets` is
+git-ignored and holds `RESTIC_REPOSITORY`, `RESTIC_PASSWORD`,
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, plus `DATABASE_URL` and
+`DATABASE_PASSWORD`. `RESTIC_REPOSITORY` is
+`s3:https://<ACCOUNT_ID>.r2.cloudflarestorage.com/courier-db-backups` and
+`init_if_missing: true` creates the *repository inside* the bucket, not the
+bucket: **the R2 bucket has to exist before the first backup**, and the failure
+mode of forgetting is a service that believes it is protected for as long as
+nobody needs it.
+
 ## CI
 
 `.github/workflows/ci.yml` calls `cafaye/kit`'s reusable workflow for the shared
@@ -34,8 +142,8 @@ half and adds the two jobs kit cannot own:
 
 Two things a reader should know before trusting a green run:
 
-- **The floors are decrease detectors, not targets.** 1134 tests, 561 of them
-  without a database, 573 with it, and 62 in the SSRF table. Delete one and CI
+- **The floors are decrease detectors, not targets.** 1156 tests, 577 of them
+  without a database, 579 with it, and 62 in the SSRF table. Delete one and CI
   goes red. Add one and CI goes red until the floor is raised, which is the
   intended direction.
 - **The `ci` job is expected to be red today**, on `test` (kit runs a bare
