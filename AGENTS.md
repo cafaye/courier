@@ -134,6 +134,12 @@ test/courier/telemetry_test.exs       the contract, the resource, the wiring
 test/courier/telemetry_canary_test.exs  THE PROOF: a canary in every field a
                                            caller controls, in nothing exported
 test/courier/secret_box_test.exs      a secret is not readable from its column
+test/courier/backup_config_test.exs   the two Kamal files held to each other:
+                                      the mount, the shared secret names, no key
+                                      material, and README's data-loss window
+test/courier/backup_tables_test.exs  what a pg_dump carries, read out of
+                                      information_schema: every table named, no
+                                      file bytes, nothing pointing outside
 test/courier/idempotency_test.exs     the claim, the refusals, the retention, the expiry
 test/courier/webhook_endpoints_test.exs        the rows and their promises
 test/courier/webhook_endpoints_config_test.exs the guard, with a chosen resolver
@@ -167,6 +173,10 @@ test/courier_web/openapi_paths_test.exs     the reader, a test per normalisation
                                            and the comparison with faults injected
 test/support/openapi_paths.ex        the reader and the comparison the two above
                                     are built on; copy this file, not a shared kit
+test/support/kamal_config.ex         the reader for config/deploy.yml and
+                                    config/kamal-backup.yml; refuses rather
+                                    than under-reads, and recognises a `secret:`
+                                    NAME only
 test/support/recording_sender.ex      a sender that records instead of sending
 test/support/header_resolver.ex       a principal that reads a header
 test/support/test_dns.ex              a resolver that answers from a table
@@ -179,6 +189,12 @@ test/support/smtp_server.ex           a real SMTP server for the round-trip test
                                       loopback port
 gate.yml                              the gate, DECLARED: command, proof, what it needs
 kit.ref                               the pinned kit commit the stack comes from
+config/deploy.yml                     kit's Kamal template with courier's facts,
+                                      and the backup accessory that mounts the
+                                      backup config into a container
+config/kamal-backup.yml               WHAT is backed up, rendered from kit's .erb,
+                                      not the .erb: read with YAML.safe_load and
+                                      never interpolated
 bin/prime                             the gate: deps, database, tests
 bin/assert-suite                      refuses a run that skipped or excluded tests
 bin/gate-self-test                    proves gate.yml is able to fail
@@ -407,15 +423,93 @@ is what its own comment instructs. A third status left that map (409 in courier-
 and the second departure is what shows the map is a list and not a constant.
 
 **A tier that CI cannot name is a tier nobody ran.** The suite partitions
-exactly, by the case template: 405 tests in the 20 files that never touch
-`Courier.Repo`, 513 in the 24 that do, and `mix test` is aliased to
-`ecto.create` first, so a runner with no database executes *zero* of the 918 —
+exactly, by the case template: 577 tests in the 25 files that never touch
+`Courier.Repo`, 579 in the 28 that do, and `mix test` is aliased to
+`ecto.create` first, so a runner with no database executes *zero* of the 1156 —
 SSRF table included. Both counts are asserted in CI by `bin/assert-suite`, and
 the SSRF table gets its own 62-test run so the log carries a line that can only
 exist if that harness ran. **When you add or delete a test, raise the floor in
 `.github/workflows/ci.yml` in the same commit.** Deleting a test to make CI green
 is caught by the floor; adding one is caught because CI goes red until you raise
 it. Both are one-line diffs, and only one of them changes what courier verifies.
+
+**A backup configuration nobody reaches is a document.** `config/kamal-backup.yml`
+is read by no process in this repository: the only reference to it anywhere is one
+`files:` line in `config/deploy.yml`, mounting it into the `backup` accessory at
+`/app/config/kamal-backup.yml`, which is where `kamal-backup` opens it. Delete
+that line and the file is still valid, still careful, and inert — the same defect
+one layer down as not having written it. So `Courier.BackupConfigTest` reads
+**both** files: the mount exists, and every secret the backup config names is in
+the accessory's `env.secret` list. That second one is not a convention: the
+`kamal-backup validate` builds the accessory's environment from that list and
+from nothing else, so a secret named in one file and missing from the other is a
+valid file in each and a **rejected pair** — measured on kamal-backup 0.5.2,
+which reports `RESTIC_REPOSITORY or RESTIC_REPOSITORY_FILE is required`. The
+rule is one-directional on purpose: every secret named in the backup config is in
+the accessory, and the accessory holds two more (`AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`) because `ConfigFile::TOP_LEVEL_KEYS` has no key for an
+AWS credential at all. A check demanding the two files name the same set would be
+wrong in the direction of failing on correct configuration.
+
+**`config/kamal-backup.yml` is RENDERED, and the `.erb` is not what ships.** kit
+ships `templates/kamal/kamal-backup.yml.erb`; what lands here is its rendered
+output, with `app:` a literal. Kamal evaluates ERB in `config/deploy.yml` because
+Kamal owns that file; `kamal-backup` does not — `KamalBackup::ConfigFile#data`
+reads the path with `YAML.safe_load` and nothing else. An unrendered
+`app: <%= service %>` is therefore *not a syntax error*: YAML reads it as a
+literal scalar, and the failure is a repository full of snapshots under
+`databases/<%= service %>/primary/`, tagged `app:<%= service %>`, which no
+`kamal-backup list` filtered on this app ever finds. The test asserts the absence
+of a tag **on the lines the tool reads**, because this file's own header quotes the
+tag while explaining the failure.
+
+**"Nothing on local disk" is a claim about courier's COLUMNS, and it is asserted
+from the schema.** `config/kamal-backup.yml` has no `paths:` key, so no restic
+file snapshot is ever taken (`latest_file_backup: null` in `evidence` is correct,
+not a gap). That is only defensible while courier stores nothing outside Postgres,
+so `Courier.BackupTablesTest` reads `information_schema` on every run and fails if
+a column appears holding file bytes or pointing at bytes held elsewhere. The one
+permitted `bytea` is `idempotency_keys.response_body` — a cached response body
+*inside* Postgres, expired on a clock — and the one thing that check must never
+become is "there is a bytea column, therefore there are files".
+
+**The SecretBox key cannot be in the backup, and that is the answer rather than a
+gap.** `webhook_endpoints.secret` is sealed under `COURIER_SECRET_BOX_KEY`, and
+`config/runtime.exs` refuses to boot without it — so it is not in the database and
+cannot be in a dump of the database. **A restore brings every signing secret back
+as ciphertext, and courier cannot read its own rows until that key is supplied
+unchanged.** The rows come back; the ability to sign with them does not. Hence
+`COURIER_SECRET_BOX_KEY` is asserted ABSENT from both the backup config and the
+accessory's secret list, and asserted PRESENT in `config/runtime.exs` — an absence
+with nothing on the other side of it is a boundary that deletes everything. The
+same shape applies to `RESTIC_PASSWORD`: lose it and every snapshot in the
+repository is permanently unreadable, including the ones not yet lost.
+
+**A scheduled dump is not PITR, and the number is measured from when the previous
+backup FINISHED.** With the shipped `schedule: 1d`, up to **24 hours** of
+committed transactions are lost if the database is destroyed — not to a wall-clock
+deadline. The scheduler's loop is *run a backup, then sleep the interval*, so one
+cycle is the interval **plus that run's duration**, and `pg_dump` takes its
+snapshot at the **start** of the dump, so the gap between two snapshot points is
+that whole cycle and is never exactly 24 hours. A failed backup is not retried
+until the next interval either; the loop logs and sleeps. `Courier.BackupConfigTest`
+reads `schedule:` from the config and asserts README quotes the matching window,
+so changing the cadence without changing the README goes red.
+
+**`config/deploy.yml` is kit's template with courier's facts, and the differences
+are three — two changes and one absence.** Copied from
+`templates/kamal/deploy.yml.erb` at kit d201080: (1) the proxy healthcheck path is
+`/readyz`, because `CourierWeb.Router` serves `/healthz` and `/readyz` and nothing
+else, so kit's `/up` would 404 on every probe and `kamal deploy` would tear back
+every rollout after `deploy_timeout` on a release that is otherwise fine;
+(2) `env.secret` carries courier's own boot-required variables, read off
+`config/runtime.exs`'s `raise`s rather than from memory. The third is an ABSENCE:
+neither file has `migrate:`, so **`bin/migrate` is not run by a `kamal deploy`.**
+Kamal 2.12.0 rejects the key outright (`Kamal::ConfigurationError: unknown key:
+migrate`, measured with the real binary) and runs migrations from
+`.kamal/hooks/pre-deploy`. That hook is courier's own file to add and this
+repository has not added it, because silently changing what a deploy does is the
+thing these rules keep refusing.
 
 Re-measure both, and **re-measure the labels rather than only the floors.** The
 suppression packet added 31 database tests and nobody raised this file: the

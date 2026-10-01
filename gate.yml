@@ -92,24 +92,37 @@ gate:
       # growing repository and this floor is a ratchet that is meant to be
       # raised as the suite grows, not a target the suite must hit.
       #
-      # Remeasured on the tree carrying the inbound provider surface
-      # (`POST /inbound/resend`): 1134 whole-suite tests, so 1128 with the same
-      # deliberate margin of 6 that 1067 held against a measured 1073, 672 against
-      # a measured 678, 722 against 728, 816 against 822, and 912 against 918.
+      # Remeasured on the tree carrying `config/kamal-backup.yml` and
+      # `config/deploy.yml`: 1156 whole-suite tests, so 1150 with the same
+      # deliberate margin of 6 that 1128 held against a measured 1134, 1067 against
+      # a measured 1073, 672 against a measured 678, 722 against 728, 816 against
+      # 822, and 912 against 918.
       #
-      # 1134 measured with `./bin/prime`, and it is the sum of the two CI tiers
-      # measured the same way in the same run: 561 with no database and 573 with
+      # 1156 measured with `./bin/prime`, and it is the sum of the two CI tiers
+      # measured the same way in the same run: 577 with no database and 579 with
       # one. That the parts sum to the whole is the consistency check worth making:
       # a mismatch would mean a test file belongs to neither tier, which would make
       # both tier floors wrong rather than the total merely stale.
       #
-      # The previous value here was 1067 against a measured 1073, remeasured on the
-      # MERGED tree after the inbound base and the event builders. The value before
-      # that was 918 against a measured 918+6, and the one before that was 816
-      # against a measured 630, raised by the observability packet in the same
-      # commit that added its 62 tests. Every one of those is this rule: the floor
-      # moves in the same commit that changes what courier verifies.
-      minimum: 1128
+      # The 22 this packet adds split 16 / 6, and the split is the claim rather
+      # than an accident. `test/courier/backup_config_test.exs` reads two files
+      # from disk and touches no `Courier.Repo`, so it belongs to the tier a
+      # runner WITHOUT a database still executes — a backup configuration that
+      # could only be checked against a live postgres would be one a database-less
+      # runner silently skips. `test/courier/backup_tables_test.exs` is a
+      # `Courier.DataCase` because its subject is the SCHEMA, read out of
+      # `information_schema` on the connected database, and the whole point of it
+      # is that "nothing on local disk" is a claim about courier's columns rather
+      # than about a comment.
+      #
+      # The previous value here was 1128 against a measured 1134. The value before
+      # that was 1067 against a measured 1073, remeasured on the MERGED tree after
+      # the inbound base and the event builders. The value before that was 918
+      # against a measured 918+6, and the one before that was 816 against a
+      # measured 630, raised by the observability packet in the same commit that
+      # added its 62 tests. Every one of those is this rule: the floor moves in
+      # the same commit that changes what courier verifies.
+      minimum: 1150
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres
