@@ -46,7 +46,14 @@ lib/courier/span_collector.ex         the on-end processor, installed by hand
 lib/courier/telemetry.ex              the contract, the resource, and the SDK
                                       wiring the application controller reads
 lib/courier/principal.ex              the caller, the resolver behaviour, and the
-                                      default resolver that authenticates nobody
+                                      default that authenticates nobody
+lib/courier/principal/introspection.ex the production resolver: identity's
+                                      introspection endpoint, and the three
+                                      answers courier turns it into
+lib/courier/principal/introspection/document.ex  the answer, in three answers:
+                                      a principal, "no", or "unreadable"
+lib/courier/principal/introspection/transport.ex  the seam, and why it is one
+lib/courier/principal/introspection/transport/req.ex  the one that dials
 lib/courier/secret_box.ex             sealing: a signing secret at rest, AES-GCM
 lib/courier/idempotency_key.ex        one (account, endpoint, key) claim, and its answer
 lib/courier/idempotency.ex            claim a key, store the response, replay it
@@ -115,6 +122,17 @@ lib/courier_web/controllers/notification_preferences_controller.ex  GET/PUT /v1
 lib/courier_web/controllers/webhook_endpoints_controller.ex  the six /v1 actions
 lib/courier_web/controllers/error_json.ex        the errors Phoenix renders
 lib/courier_web/router.ex             probes at the root, /v1 for the API
+lib/courier_web/plugs/principal.ex   who is calling; 401 when nobody is, and 503
+                                      when courier cannot find out
+test/courier/principal/introspection/document_test.exs  the answer, as a table,
+                                      with no socket and no database
+test/courier/principal/introspection_test.exs the resolver, end to end against a
+                                      table, and the credentials' absence from logs
+test/courier/principal/introspection/transport_req_test.exs  the shipped
+                                      transport, driven through Req's own plug
+test/courier_web/plugs/principal_config_test.exs  the plug's two refusals over
+                                      real requests, and openapi.yaml's 503
+test/support/introspection_transport.ex a transport that answers from a table
 test/courier/health_test.exs          the readiness check, on its own
 test/courier/mailers_test.exs         what the platform hands in, per message
 test/courier/mailers_config_test.exs  the sender and the subject are config
@@ -726,6 +744,146 @@ account comes from `conn.assigns.current_account`, never from a request body —
 `CourierWeb.Plugs.Principal` is a seam with a refusing default, so a courier
 without identity's JWT verifier is locked rather than open.
 
+**The door has a key now, and the key is `account_id`.** `Courier.Principal.
+Introspection` is what `config :courier, :principal` names outside test: it reads
+the caller's token from `Authorization: Bearer` and asks identity
+`POST /v1/introspections`. The token is **opaque** — `cafaye_` plus random bytes,
+SHA-256 in the row — so there is no claim to read locally and no key to verify
+against, and asking identity is the only way to learn an `account_id`. Four rules
+came out of writing it, and each is a place the obvious version is wrong:
+
+  * **`account_id` is the only tenancy key and there is no `sub` fallback.**
+    `sub` is the *user* a token names. `Document.account_id/1` uses
+    `Map.fetch/2` **with no default argument**, which is what makes the fallback
+    inexpressible in the one function that decides the account — and the subject
+    is read two functions below and is a perfectly good uuid, which is exactly
+    why a `||` would be so easy to write by accident. A document that is active
+    and carries no `account_id` is `:error` (a 401), because a token courier
+    cannot place is a caller courier cannot serve. An `account_id` that is
+    *present and malformed* is `{:error, :unreadable}` (a 503), because identity
+    said something courier does not understand, and reporting that as an answer
+    is how courier ends up logging somebody in as the account `"not-a-uuid"`.
+  * **One answer for every unusable token.** Unknown, revoked, expired and
+    orphaned all arrive as `200 {"active": false}` and courier does not
+    re-expand them. There is no branch on `exp`, no clock, and no `revoked`
+    claim anywhere in `Document` — the structural reason the four cannot come
+    apart. `identity`'s `mayIntrospect` runs the standing check *after* the
+    token resolves, so an unknown token is inactive for everybody.
+  * **Both scope claim names are read, and neither is assumed absent.** `scopes`
+    and `scope` are emitted byte for byte because the fleet has not agreed on
+    one (MD7, open in the manager's `DECISIONS.md`): core requires `scopes`,
+    guard reads `scope`. courier reads the union. A claim that is present and is
+    **not a string** is `{:error, :unreadable}` rather than an empty set — the
+    array is the shape a losing side of MD7 could adopt, and reading it as "no
+    scopes" is the silent version of that bug. The clause order matters: `:error`
+    before the malformed clause, because a bare `_absent` variable matches
+    everything after it. That was a real bug, caught by a test.
+  * **`scopes` is parsed and deliberately NOT enforced.** `Courier.Principal`
+    gained a `scopes` field and nothing reads it to make a decision, and that is
+    a decision with a **measured** reason: identity's vocabulary is a closed set
+    of six (`accounts:read`, `accounts:write`, `accounts:delete`,
+    `oidc_clients:write`, `audit_log:read`, `account_invitations:write`), and
+    **not one of the five scopes `openapi.yaml` declares** (`webhooks:read`,
+    `webhooks:write`, `notifications:read`, `notifications:write`,
+    `messages:write`) can be minted by it. A scope check written today would
+    refuse every credential identity is able to issue. What courier enforces is
+    tenancy. `openapi.yaml`'s `bearerAuth` says all of this where a client author
+    reads it.
+
+**Authentication is a network hop, so a dependency failure is a 503 and not a
+401.** Every operation behind the plug can now answer `503`: identity
+unreachable, slow, erroring, **or answering 401/403**, or answering in a shape
+courier cannot read. Two of those are load-bearing and neither is obvious:
+
+  * **identity's own 401 and 403 are courier's problem, not the caller's.**
+    identity answers 401 when the credential *courier* presented is not one it
+    accepts, and 403 when that credential may not ask about the token it named
+    (`mayIntrospect`: a token caller may read *itself* and nothing else). Both
+    are facts about this deployment. Reporting either as a 401 tells a customer
+    to rotate a token that was never the problem, and an operator reads a wall
+    of "invalid credentials" when the fault is one environment variable.
+  * **A 200 courier cannot read is also a 503.** `Document.from/1` returns
+    `{:error, :unreadable}` for that, and only an explicit `{"active": false}`
+    is the `:error` that becomes a 401. A document that fails to *say* a token is
+    usable has not said the token is unusable.
+
+The alternative was to let the request through when identity cannot be reached,
+and that is the thing this rule exists to prevent: a resolver that fails OPEN
+under load is worse than `Reject`, because it fails *silently*. So is "no answer
+means the session is still valid" — a caching temptation this repository refuses,
+because a cached introspection answer is a revocation that has not taken effect
+yet and the answer courier would serve from it is `account_id`. **There is no
+cache**, and the cost is stated rather than assumed: courier's latency includes
+identity's, and identity's outage is courier's outage.
+
+**`{503, :unavailable}` is a third answer, and `CourierWeb.Plugs.Principal`
+learned it.** `Courier.Principal.Resolver.answer` was `{:ok, principal} |
+:error`, which was enough for a resolver that either knows or does not. A
+resolver that has to **ask somebody** has a third case, and the plug is the only
+place that can write the response, so it gained exactly one clause. **The 401
+branch is untouched and that is a test, not a promise**:
+`principal_config_test.exs` drives the same request through both resolvers and
+asserts the two 401 envelopes are equal field for field — `type`, `code`,
+`status`, `title`, `detail`, `instance` — dropping `trace_id` **by name** rather
+than by a rule, because that field is per request by design and comparing two
+requests' identities would fail for a reason that has nothing to do with the plug.
+Every `/v1` operation now declares the 503 in `openapi.yaml`, and the header
+says why; the document test holds it to the router in both directions, reading
+the operation set out of `Phoenix.Router.route_info/4` rather than a list.
+
+**What courier presents to introspect is `COURIER_IDENTITY_TOKEN`, and that was a
+judgement call rather than an accident.** It is courier's own scoped API token,
+in the environment, never in argv (anything on a command line is in `ps` output
+and in a shell history) and never in a committed config file. It is never
+logged and never part of a reason: every refusal is a symbol, and
+`introspection_test.exs` captures real log output and asserts it is ABSENT —
+which is the assertion worth more than "it logged something", because a boundary
+that deletes everything passes that. **Rotation is identity's**: mint, redeploy,
+revoke; nothing is cached to invalidate. `config/runtime.exs` **refuses to boot**
+without it in prod, on the same rule as `COURIER_SECRET_BOX_KEY`: a resolver with
+no credential authenticates nobody, and discovering that at boot is cheaper than
+discovering it from a support ticket.
+
+**RFC 7662 §2.1 lets courier forward the caller's own token, and courier does
+not.** identity implements that affordance — "a token may introspect **itself**"
+— so forwarding would need no second secret at all. It covers **only the token
+identity is holding**, so any other tenant's token is a 403: a door shut for
+every real tenant and open for exactly the one account that owns courier's own
+service token. That is the worst shape a credential can have, so courier presents
+its own and **reports identity's 403 as a 503** rather than pretending a tenant
+can authenticate. The contract gap is in the packet report, not fixed here.
+
+**No credential appears in argv, in a committed file, or in a log, and the whole
+class of leaks here starts with a *body*.** `introspection_test.exs` asserts the
+caller's token, courier's own token, and the account id are all absent from
+captured output. `Transport.Req` sets `decode_body: false` so **courier** decodes
+the answer, in `Document`, where the rules about what an unreadable answer means
+are written down — `Req`'s default decoder hands back a map, `to_string/1` on a
+map raises `String.Chars`, and the first draft did exactly that. The 2s
+`receive_timeout`, `retry: false`, `redirect: false` and `max_redirects: 0` are
+merged AFTER `:introspection_req_options` so nothing in `config/` can switch
+them off: they are decisions, not settings.
+
+**A request with no bearer is refused WITHOUT calling identity.** Not an
+optimisation — an unauthenticated endpoint that dials a dependency per request
+is a load generator pointed at identity by anybody who finds courier's URL. And
+the test resolver's `x-courier-account` header is ignored by this resolver, which
+is asserted over a real resolver call rather than left as a convention: a header
+that becomes a fast path is an authentication bypass with a config file attached.
+
+**A seam is tested from both sides or it is not tested.** The resolver's tests run
+against `Courier.TestSupport.IntrospectionTransport`, a table; the shipped
+`Transport.Req` runs against Req's own `plug: {Req.Test, …}`. A suite that only
+ever answers from a table proves nothing about the request courier really builds,
+and the symptom of a wrong header or path is a 403 from identity that looks
+exactly like a misconfigured credential. The stub is registered in `setup`, not
+`setup_all`: `Req.Test` uses nimble_ownership, and a stub set in `setup_all`
+belongs to a process that has exited by the time the first test runs.
+
+**Nothing sleeps, including the introspection dial's own budget.** The 2s timeout
+is asserted as a number on `Transport.Req.receive_timeout_ms/0` rather than as
+the fact that one exists, and no test waits for it.
+
 **One span-attribute allowlist, in `Courier.Observability`, and it is a
 choke point rather than a convention.** Every attribute courier records goes
 through `Courier.Observability.record/2`, which drops anything not on the list;
@@ -808,6 +966,25 @@ never committed to a config file. Only the four with a correct default are
 defaulted (`COURIER_SMTP_PORT` 587, `COURIER_SMTP_AUTH` and `COURIER_SMTP_TLS`
 `always`, `COURIER_SMTP_SSL` `false`); the adapter itself is required, because an
 adapter with a default is wrong for exactly the deployments nobody is watching.
+
+And two from the door, read by `Courier.Principal.Introspection`, where **the
+asymmetry between them is the decision**:
+
+- **`COURIER_IDENTITY_TOKEN`** — courier's own scoped API token, presented as the
+  `Authorization` header on identity's introspection call. **Required in prod,
+  never defaulted, and refused at boot**: a default would be a credential in
+  version control that every deployment which forgot one would authenticate
+  callers with. Mint one with `POST /v1/accounts/{account_id}/api-keys` in an
+  account that belongs to courier and to nothing else; rotate by minting a new
+  one, redeploying and revoking the old — there is no cache to invalidate.
+  `config/test.exs` sets a fixed one, on the same terms as
+  `COURIER_SECRET_BOX_KEY`.
+- **`COURIER_IDENTITY_URL`** — identity's base URL, defaulted to
+  `http://identity:4000` (the compose-network name, and the same shape as
+  `COURIER_OTEL_ENDPOINT`'s default). A wrong URL is a **503 on every
+  authenticated request**: loud, diagnosable and retriable — which is why
+  making a dependency's address a boot requirement would turn "identity moved"
+  into a stop-the-world upgrade gate for a service that is otherwise fine.
 
 - **`COURIER_MAIL_ADAPTER`** — `smtp`, the only adapter courier ships. `none` is
   `Swoosh.Adapters.Local` and is **refused in production**. Unset is a boot

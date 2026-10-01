@@ -82,8 +82,10 @@
 # it, and each is the reason no operation below declares it:
 #
 #   * **403 `forbidden`** — nothing sends it. `CourierWeb.Plugs.Principal`
-#     answers 401 for an anonymous caller and nothing else, and a resource in
-#     another account is a 404, because core forbids a 403 that leaks existence.
+#     answers 401 for an anonymous caller and 503 when it cannot ask identity,
+#     and never 403; and a resource in another account is a 404, because core
+#     forbids a 403 that leaks existence. courier has no role a claim could
+#     grant it, so there is no input to a 403.
 #   * **409 on a duplicate `url`** — a duplicate `url` is a **422** whose
 #     `errors[0].code` is `taken`, which is the status convention's
 #     "semantically wrong", not a conflict. The 409s that *are* declared are for
@@ -95,7 +97,7 @@
 #   * **429 `rate_limited`** — there is no limiter. Thirty rapid reads answer
 #     thirty 200s and thirty rapid writes answer thirty 201s.
 #
-# ## 503 `unavailable` is declared now, and this line is what changed
+# ## 503 `unavailable` is declared on every authenticated operation, and this line is what changed
 #
 # It used to sit in the list above with the note "only `GET /readyz` sends it",
 # which was true and is no longer. `sendMessage` has a dependency courier does not
@@ -113,10 +115,39 @@
 #     `courier.email.delivered` for mail nobody receives, which is the whole
 #     failure the adapter work exists to end.
 #
+# **AND NOW EVERY OPERATION BEHIND `CourierWeb.Plugs.Principal` HAS ONE, because
+# authentication is a network hop.** courier resolves a caller by asking identity's
+# `POST /v1/introspections` about the token the request carries — identity's token is
+# opaque, so there is no claim to read and no key to verify against. That means a
+# dependency courier does not control sits on the request path of every `/v1`
+# operation, and every one of them can now answer:
+#
+#   * **identity is unreachable, slow or erroring.**
+#   * **courier's own credential is wrong** — identity answers 401 for a credential
+#     it does not accept and 403 for one that may not ask about the token it named.
+#     Both are facts about THIS DEPLOYMENT, not about the caller's token.
+#   * **identity answered in a shape courier cannot read.**
+#
 # It is 503 and not 500 because courier is fine and its dependency is not, and that
 # is the difference between a generated client retrying and a generated client
-# filing a bug against courier. `GET /readyz` still sends it, and still is not an
-# operation in this document.
+# filing a bug against courier.
+#
+# **AND IT IS NOT A 401, which is the part worth reading twice.** A 401 says "your
+# credential is not acceptable". identity being down says nothing of the sort, and a
+# customer holding a perfectly good token who is told 401 will rotate it — and still
+# be refused. So the one case where a 503 would be *wrong* (a genuinely dead token)
+# is the case identity answers `200 {"active": false}` for, and courier turns that
+# into a 401 like any other refusal.
+#
+# **AND IT IS NOT A 200-either.** The alternative was to let the request through when
+# identity could not be reached. That is a resolver that fails OPEN under load, and
+# it is worse than the locked door courier shipped for a year: it does not fail, it
+# quietly serves.
+#
+# `GET /readyz` still sends a 503, and still is not an operation in this document.
+# `test/courier_web/plugs/principal_config_test.exs` holds this section to the
+# router in both directions: every operation behind the principal plug declares a
+# 503, and no operation outside it claims one.
 #
 # ## Idempotency-Key, and what each of the three answers means
 #
@@ -679,6 +710,7 @@ paths:
         '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
     put:
       tags: [notification preferences]
@@ -756,6 +788,7 @@ paths:
         '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
   /v1/webhook_endpoints:
     get:
@@ -782,6 +815,7 @@ paths:
         '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
     post:
       tags: [webhook endpoints]
@@ -907,6 +941,7 @@ paths:
                     trace_id: 0af7651916cd43dd8448eb211c80319c
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
   /v1/webhook_endpoints/{id}:
     parameters:
@@ -932,6 +967,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '406': { $ref: '#/components/responses/NotAcceptable' }
         '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
     patch:
       tags: [webhook endpoints]
@@ -977,6 +1013,7 @@ paths:
         '406': { $ref: '#/components/responses/NotAcceptable' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
         '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
     delete:
       tags: [webhook endpoints]
@@ -992,6 +1029,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '406': { $ref: '#/components/responses/NotAcceptable' }
         '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
   /v1/webhook_endpoints/{id}/test:
     parameters:
@@ -1078,18 +1116,50 @@ paths:
                     code: conflict
                     trace_id: 0af7651916cd43dd8448eb211c80319c
         '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/Unavailable' }
 
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
       description: |
-        identity is the only issuer. The token carries `account_id` for tenancy
-        and `scopes` for capability; courier checks both and never reads a role
-        out of a claim, because core's conventions say a service asks identity
-        about roles and checks scopes itself.
+        An **opaque** token issued by identity, presented as
+        `Authorization: Bearer <token>`. There is no claim document inside it and
+        no published key set to verify one against: identity's token is `cafaye_`
+        plus random bytes and the row holds a SHA-256 of it. So courier does not
+        verify it locally — courier **asks identity**,
+        `POST /v1/introspections`, and reads the answer.
+
+        The `bearerFormat` below is deliberately absent rather than `JWT`. It was
+        `JWT`, and it was wrong: a client reading `bearerFormat: JWT` builds a
+        client that parses a token courier never parses. `type: http` with
+        `scheme: bearer` is the whole of what courier actually checks, and a
+        document that overstates a credential is a document a generated client is
+        built wrong from.
+
+        ## The scopes below are declared and NOT enforced
+        Every operation here names a scope — `webhooks:read`, `notifications:write`,
+        `messages:write` — and **courier does not check any of them yet.** That is
+        a decision with a measured reason rather than an omission:
+
+          * courier parses the scope set out of identity's answer, under **both**
+            claim names (`scopes` and `scope`, which identity emits byte for byte
+            because the fleet has not agreed on one), and carries it on the
+            principal;
+          * identity's scope vocabulary is a **closed set of six** —
+            `accounts:read`, `accounts:write`, `accounts:delete`,
+            `oidc_clients:write`, `audit_log:read`, `account_invitations:write`
+            — and **not one of the five names declared below can be minted by
+            it.** A check written today would refuse every credential identity is
+            able to issue.
+
+        So these names are the **intent**, and the thing courier actually enforces
+        is tenancy: is there a principal, and is the resource in that principal's
+        `account_id`. The day identity's vocabulary grows these names, the check is
+        one comparison and nothing else in this document moves. What this document
+        must not do is claim a 403 — it does not, and `CourierWeb.Plugs.Principal`
+        does not send one.
 
     webhookSignature:
       type: apiKey
@@ -2031,36 +2101,89 @@ components:
 
     Unavailable:
       description: |
-        The mail provider did not accept the message, or courier is not
-        configured to deliver at all. **503 and not 500**, because courier is fine
-        and its dependency is not — which is the whole difference between a
-        generated client retrying and a generated client filing a bug against
-        courier.
+        courier could not complete this request because a dependency it does not
+        control did not answer. **503 and not 500**, because courier is fine and
+        the dependency is not — which is the whole difference between a generated
+        client retrying and a generated client filing a bug against courier.
 
-        Two causes, and a caller cannot tell them apart and does not need to:
+        **The retry is always safe.** On every authenticated operation courier has
+        not read the body, has not reached a controller, and has written nothing —
+        so this is the one response in this document with no side effects to
+        reason about. A failed request also *releases* its `Idempotency-Key`
+        rather than storing the failure, so retrying with the same key is not
+        locked out for 24 hours.
+
+        ## Two causes, and which operations can get which
+        One response covers both because OpenAPI has one slot per status, and
+        `sendMessage` can get either.
+
+        **On EVERY operation behind `CourierWeb.Plugs.Principal`** —
+        courier resolves a caller by asking identity's `POST /v1/introspections`
+        about the token the request carries, because identity's token is opaque
+        and has no claim to read locally. So authentication is a network hop on
+        every one of them, and this response is what courier sends when:
+
+          * **identity is unreachable, slow, or erroring**;
+          * **courier's own credential is wrong** — identity answers 401 for a
+            credential it does not accept, and 403 for one that may not ask about
+            the token it named. Both are facts about *this deployment*, and
+            neither is a fact about the caller's token;
+          * **identity answered in a shape courier cannot read.**
+
+        **`sendMessage` only** — the mail provider did not accept the message, or
+        courier is not configured to deliver at all:
 
           * **the provider refused** — a relay that returned an error, a credential
             it rejected, a socket that would not open;
           * **courier cannot deliver** — `COURIER_MAIL_ADAPTER` names an adapter
-            that never opens a socket, or names none.
+            that never opens a socket, or names none. Nothing was sent and no
+            outbox row was written, so nothing claims a delivery that did not
+            happen.
 
-        **The retry is safe in both cases**: nothing was sent, and no outbox row
-        was written, so nothing claims a delivery that did not happen. A failed
-        request also *releases* its `Idempotency-Key` rather than storing the
-        failure, so retrying with the same key is not locked out for 24 hours.
+        ## It is deliberately NOT a 401
+        A 401 says "your credential is not acceptable". A dependency being down
+        says nothing of the sort, and a client that reads this as one will rotate a
+        token that was never the problem and be refused again. The case where a 401
+        *is* correct — a token that is unknown, revoked, expired, or whose owner
+        has left the account — is the case identity answers `200 {"active": false}`
+        for, and courier turns that into a 401 with the same body every time. A
+        caller therefore cannot tell those apart from this one, which is the
+        property that stops a status an attacker provoked from being an oracle for
+        whether a leaked token was live.
+
+        ## The detail says nothing about the cause
+        identity's status, the dial failure and the shape of its answer are in
+        courier's logs under this response's `trace_id`. They are not here because
+        this is a response anybody can provoke, and "courier could not confirm who
+        is calling" tells a caller neither which credential courier holds nor what
+        shape the service on the other side of it is.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
-          example:
-            type: https://errors.cafaye.com/unavailable
-            title: Service unavailable
-            status: 503
-            detail: >-
-              The mail provider did not accept the message. Nothing was sent and
-              nothing was recorded, so this request is safe to retry with the same
-              Idempotency-Key.
-            code: unavailable
-            trace_id: 0af7651916cd43dd8448eb211c80319c
+          examples:
+            identityUnavailable:
+              summary: courier could not ask identity who is calling
+              value:
+                type: https://errors.cafaye.com/unavailable
+                title: Service unavailable
+                status: 503
+                detail: >-
+                  courier could not confirm who is calling, so it is not serving this
+                  request.
+                code: unavailable
+                trace_id: 0af7651916cd43dd8448eb211c80319c
+            providerUnavailable:
+              summary: sendMessage only — the mail provider refused
+              value:
+                type: https://errors.cafaye.com/unavailable
+                title: Service unavailable
+                status: 503
+                detail: >-
+                  The mail provider did not accept the message. Nothing was sent and
+                  nothing was recorded, so this request is safe to retry with the same
+                  Idempotency-Key.
+                code: unavailable
+                trace_id: 0af7651916cd43dd8448eb211c80319c
 
     ValidationFailed:
       description: |

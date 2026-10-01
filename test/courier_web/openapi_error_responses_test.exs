@@ -386,8 +386,23 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
     #     receives. The provoke for it is the same shape as the others and lives
     #     with the code that can reach it, because provoking it means substituting
     #     the mailer's adapter.
+    #
+    # **AND 503 LEFT THIS LIST ENTIRELY in courier-26**, which is the second time
+    # this file has had to correct a list rather than extend it, and the reason is
+    # worth reading: authentication became a NETWORK HOP. `CourierWeb.Plugs.
+    # Principal` now resolves a caller by asking identity's introspection endpoint,
+    # so every operation behind it can answer 503 when identity is unreachable and
+    # courier answers nothing else. `test/courier_web/plugs/principal_config_test.
+    # exs` holds that against the router in both directions, and its provoke lives
+    # with the resolver that can reach the status.
+    #
+    # **403 stays on this list, and the reason beside it changed.** The plug used
+    # to be described as answering "401 and nothing else", which was true when
+    # every refusal was a 401 and is no longer — the plug now sends 503 too. The
+    # claim this list carries is narrower and is still true: courier has no role a
+    # claim could grant it, so there is no input to a 403.
     @unreachable %{
-      "403" => {"Principal", "`CourierWeb.Plugs.Principal` answers 401 and nothing else"},
+      "403" => {"Principal", "`CourierWeb.Plugs.Principal` answers 401 and 503, never 403"},
       "415" => {"pass:", "the parser is configured `pass: [\"*/*\"]` and refuses nothing"},
       "429" => {"no limiter", "thirty rapid writes answer thirty 201s"}
     }
