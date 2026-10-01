@@ -34,8 +34,8 @@ half and adds the two jobs kit cannot own:
 
 Two things a reader should know before trusting a green run:
 
-- **The floors are decrease detectors, not targets.** 728 tests, 356 of them
-  without a database, 372 with it, and 62 in the SSRF table. Delete one and CI
+- **The floors are decrease detectors, not targets.** 1134 tests, 561 of them
+  without a database, 573 with it, and 62 in the SSRF table. Delete one and CI
   goes red. Add one and CI goes red until the floor is raised, which is the
   intended direction.
 - **The `ci` job is expected to be red today**, on `test` (kit runs a bare
@@ -159,12 +159,70 @@ the startup line, which names the host and port and deliberately omits the
 username as well as the password, because at SMTP a username is usually an API
 key.
 
+## Hearing back from the provider
+
+A submission protocol's whole reply is "accepted for delivery", so courier never
+learns what happened to a message. The provider reports back by webhook, and
+`POST /inbound/resend` is the surface that takes those reports:
+
+```sh
+COURIER_INBOUND_RESEND_SECRET=whsec_…    # required in prod; the provider's own secret
+```
+
+That secret is the one courier **verifies** with, copied from the provider's
+dashboard (Resend: the webhook endpoint's Signing Secret). It is not the secret
+courier signs outbound deliveries with — those are generated per endpoint,
+sealed under `COURIER_SECRET_BOX_KEY` and stored in the database, and conflating
+the two would mean a deployment that leaked a customer's outbound secret could
+also forge inbound suppressions.
+
+**Unset is a refusal to boot in production.** Every hard bounce and every
+complaint would be *discarded*, silently enough that `email_suppressions` stays
+empty, `POST /v1/messages` goes on mailing addresses that have permanently
+refused, and a sending domain's reputation dies of a cause no dashboard names.
+That is the failure `Courier.Suppressions` was written to prevent, arriving
+through the door meant to prevent it.
+
+Three things about the surface that are decisions rather than details, each
+argued at length in the module that owns it:
+
+- **It is authenticated by a signature, not a token, and it is outside `/v1`.** A
+  provider is not a tenant: Resend signs with Svix and sends no bearer token, so
+  a principal would `401` every delivery — and behind no plug at all it would be
+  an unauthenticated `POST` that records suppressions, which is a denial of
+  service on the whole product delivered by the feature meant to prevent it.
+  `Courier.Inbound.Signature` verifies **before** the body is parsed, and the
+  endpoint's `Plug.Parsers` is deliberately skipped for this route so the bytes
+  that arrive are the bytes that were signed. It is the only operation in
+  `openapi.yaml` that declares `webhookSignature` rather than `bearerAuth`.
+- **A provider retry is a 200, and there is no `Idempotency-Key`.** Delivery is
+  at-least-once, so a second delivery of the same report is normal; the
+  deduplication is `email_suppressions`'s unique index on
+  `(provider, provider_event_id)`, which the parser derives from the report's own
+  **content** rather than from the `webhook-id` header — a stronger key, because
+  one delivery can name many recipients and keying on the header would collapse a
+  broadcast into one suppression.
+- **No response on this operation carries an email address.** Not the counts, not
+  a `422`'s `detail`. The suppression table has no `account_id` and is not
+  exposed through any route, so an address in a response body is a way to query
+  mailboxes courier holds. The address is in the logs, which is where the parser
+  puts it.
+
+Accepted reports publish `courier.email.bounced` and `courier.email.complained`,
+in the same transaction as the suppression row, with the `user_id` and
+`notification_type` **read back from the send that caused them** — a provider
+report carries a `Message-ID` and a recipient, never a user, and an event with a
+`null` user id is a payload core's own schema rejects on the bus. A report whose
+`Message-ID` names no send courier made records its suppression and publishes no
+event, with a log line: the row is the load-bearing half.
+
 ## Not here yet
 
-Transactional email, Swoosh and its providers, notification preferences,
-outbound webhooks, Oban, and the delivery pipeline. PLAN.md §3 requires every
-courier consumer to be idempotent and tested, because delivery is
-at-least-once — that is the next packets' job, and this scaffold deliberately
-does not guess at it.
+`courier.notification.suppressed` has a builder and no caller: a send courier
+refused writes no outbox row, because `Courier.Deliver`'s moduledoc promises "no
+mail, no event, no record of a send that did not happen", and that promise is
+`Courier.Events`' to argue with rather than to override. `courier.email.queued`
+has no builder because courier has no queue — the send path is synchronous and
+that type exists to make a *backlog* visible.
 
 Conventions live in [AGENTS.md](AGENTS.md).

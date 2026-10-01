@@ -790,12 +790,18 @@ defmodule CourierWeb.OpenAPIPathsTest do
       # is caught here rather than as a baffling failure in the check built on it.
       responses = Paths.document_responses!()
 
-      # 9 operations, and the number is here to be changed in the commit that adds
+      # 10 operations, and the number is here to be changed in the commit that adds
       # or removes one rather than to be discovered by the count assertion below
       # firing on an unrelated edit. It is a tripwire, not the assertion: the check
       # that matters is the loop underneath, which asks every non-2xx whether it is
       # wired to courier's envelope.
-      assert map_size(responses) == 9
+      #
+      # 9 → 10 with `POST /inbound/resend`, the provider webhook courier receives
+      # signed reports on. It is counted here for the same reason every other
+      # operation is: a document that quietly stops describing an operation is the
+      # failure `CourierWeb.OpenAPIDocumentTest` exists to catch, and this file is
+      # the reader that would stop understanding the document first.
+      assert map_size(responses) == 10
 
       for {_operation, declared} <- responses, {status, response} <- declared do
         if not String.starts_with?(status, "2") do

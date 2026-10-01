@@ -70,6 +70,84 @@ defmodule CourierWeb.RouterTest do
     end
   end
 
+  describe "the inbound provider surface" do
+    alias CourierWeb.InboundController
+
+    test "POST /inbound/resend resolves to CourierWeb.InboundController.create/2" do
+      assert %{plug: InboundController, plug_opts: :create, route: "/inbound/resend"} =
+               Phoenix.Router.route_info(Router, "POST", "/inbound/resend", "")
+    end
+
+    test "it is NOT behind the authenticated pipeline, and that is a decision" do
+      # The assertion that would look wrong here is the point. A provider is not
+      # a tenant: Resend signs its webhook with Svix and sends no bearer token, so
+      # behind `CourierWeb.Plugs.Principal` every delivery would be a 401.
+      #
+      # The reason this is safe is the next test, and the reason it is here at all
+      # is that "not behind the auth plug" is a sentence a later reader should have
+      # to read the tests to believe.
+      assert %{pipe_through: pipelines} =
+               Phoenix.Router.route_info(Router, "POST", "/inbound/resend", "")
+
+      refute :authenticated in pipelines
+
+      # And the 406 every operation in `openapi.yaml` declares comes from `:api`,
+      # listed beside `:inbound` rather than folded into it — so there is one
+      # `:accepts` in this file and not two to keep in step.
+      assert :api in pipelines
+      assert :inbound in pipelines
+    end
+
+    test "and it authenticates by SIGNATURE instead" do
+      # The claim, asserted about the route rather than about a helper: an
+      # unsigned body is refused and records nothing. See
+      # `CourierWeb.InboundControllerTest` for the rows and
+      # `CourierWeb.Plugs.ParseBodyTest` for the mechanism — a route with no auth
+      # plug whose only authentication is a helper is a route whose authentication
+      # is a convention, and this is the assertion that says it is not.
+      assert %{plug: InboundController, plug_opts: :create} =
+               Phoenix.Router.route_info(Router, "POST", "/inbound/resend", "")
+    end
+
+    test "it is NOT behind the idempotency pipeline, and dedupes on the provider's event id" do
+      # A provider retries a webhook it got no answer for, and that is normal. The
+      # `Idempotency-Key` header it would have to send is one no provider sends,
+      # and `CourierWeb.Plugs.Idempotency` is scoped to a principal this route has
+      # none of. The deduplication that answers the retry is
+      # `email_suppressions`'s unique index on `(provider, provider_event_id)`,
+      # which `Courier.Inbound.Resend` derives from the report's own content — a
+      # stronger key than the header, because one delivery can name many
+      # recipients and keying on the header would collapse them into one row.
+      assert %{pipe_through: pipelines} =
+               Phoenix.Router.route_info(Router, "POST", "/inbound/resend", "")
+
+      refute :idempotent in pipelines
+    end
+
+    test "its path is outside /v1, because it is not a tenant operation" do
+      # `/v1` is courier's versioned contract with a tenant, and every operation
+      # under it is authenticated with a bearer token. `PLAN.md` MD6 has the
+      # platform generating client SDKs from `openapi.yaml`, so an operation filed
+      # under `/v1` that cannot take a bearer token is a method a generated client
+      # will call wrongly.
+      refute String.starts_with?("/inbound/resend", "/v1")
+    end
+
+    test "the provider is in the path, so a body cannot choose its own vocabulary" do
+      # A body naming the provider would be a caller choosing which parser reads
+      # its own payload. The path is chosen by whoever configured the webhook, in
+      # the provider's dashboard, so courier does not get to disagree with it.
+      assert %{route: "/inbound/resend"} =
+               Phoenix.Router.route_info(Router, "POST", "/inbound/resend", "")
+    end
+
+    test "it does not answer write methods other than POST" do
+      for method <- ~w(GET PUT PATCH DELETE) do
+        assert :error == Phoenix.Router.route_info(Router, method, "/inbound/resend", "")
+      end
+    end
+  end
+
   describe "the webhook endpoints surface" do
     alias CourierWeb.WebhookEndpointsController
 

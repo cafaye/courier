@@ -63,6 +63,24 @@ config :courier, :nats_publisher, Courier.NatsPublisher.Noop
 # and refuses to boot without it, and this value is in the repository.
 config :courier, :secret_box_key, "Y291cmllci10ZXN0LW9ubHkta2V5LTMyLWJ5dGVzISE="
 
+# The signing secret the inbound route VERIFIES with, in test.
+#
+# Test-only in the same sense as `COURIER_SECRET_BOX_KEY` above, and on the same
+# terms: it is a fixture, never a default, and no production deployment reads it
+# — `config/runtime.exs` requires a real one from the environment and refuses to
+# boot without it. It is the SAME string `Courier.TestSupport.FakeResend.secret/0`
+# signs with, so the suite needs no provider, no network and no real secret to
+# drive a signed report all the way through the route.
+#
+# The value is written out rather than calling `FakeResend.secret/0`, because
+# `config/test.exs` is evaluated by the config reader before the application's
+# modules are loaded and a module call here is an `:undef` at boot.
+# `test/courier_web/inbound_config_test.exs` asserts the two are the same string,
+# so the duplication cannot become a fixture the suite signs with and the
+# application does not verify with — which would turn every positive test in the
+# inbound suite green for the wrong reason.
+config :courier, :inbound_secrets, %{"resend" => "whsec_cHViNGlzaGVhZGZha2VzZWNyZXRmb3J0ZXN0cw=="}
+
 # The SSRF guard's resolver in test. `Courier.TestSupport.TestDns` answers from
 # a table a test writes, so every URL in the suite — including ones pointing at
 # `127.0.0.1` — is checked without a DNS lookup whose answer could differ

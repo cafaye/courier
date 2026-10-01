@@ -145,17 +145,57 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
       # nobody documented. A `GET` is the mirror: a 400 declared there is a case a
       # client writes for and can never run.
       #
-      # Both halves of this were real. courier-12's first draft of this test
-      # checked only the "declares it" half, passed, and shipped a `DELETE` with
-      # an undocumented 400 and a `GET` with a documented one that cannot happen.
+      # **And one operation is not reached by that probe at all**, which is the
+      # half worth reading. `POST /inbound/resend` authenticates by provider
+      # SIGNATURE and its body is deliberately left unparsed, so an unsigned
+      # malformed body is refused as a **401** — which is the security property
+      # (`Courier.Inbound.Signature` verifies before anything reads the bytes) and
+      # not an inconvenience. Provoking it the way every other operation is
+      # provoked would therefore report "this 400 is unreachable" and the document
+      # would have to stop declaring a status the route really can send.
+      #
+      # So the probe for that one operation is a body that is not JSON **signed
+      # correctly**, which is the only way to reach its 400. That is the whole
+      # correction: the assertion below is unchanged and still runs in both
+      # directions for every operation, and the reachability half is now measured
+      # rather than guessed for the one operation whose 400 needs a credential.
+      #
+      # Both halves of the "both directions" rule were real. courier-12's first
+      # draft of this test checked only the "declares it" half, passed, and shipped
+      # a `DELETE` with an undocumented 400 and a `GET` with a documented one that
+      # cannot happen.
       probed =
         for operation <- Map.keys(responses), into: %{} do
-          {operation, provoke(operation, malformed_body: true) == 400}
+          {operation, provoke_malformed_body(operation) == 400}
         end
 
       assert Enum.any?(probed, fn {_op, reachable} -> reachable end),
              "no operation answered 400 to a body that is not JSON, so this test " <>
                "proved nothing: the parser has stopped refusing one"
+
+      # And the signed probe is **known to have run for something**. A reader that
+      # found no signature-authenticated operation would fall back to the plain
+      # probe for all of them and this test would stay green while its own special
+      # case did nothing — the "a check over nothing passes" failure, in the one
+      # place this file's own moduledoc says it is worst.
+      signed =
+        Map.keys(responses)
+        |> Enum.filter(&signed_webhook?/1)
+        |> Enum.map(&{&1, provoke_malformed_body(&1)})
+
+      assert signed != [],
+             "no operation in #{@document} declares `webhookSignature`, so the signed " <>
+               "malformed-body probe this file added for the inbound surface is not being " <>
+               "used by anything. Either the probe is dead or the document stopped saying " <>
+               "how that operation is authenticated — and the 400 below would then be " <>
+               "declared against a status nobody can reach."
+
+      for {operation, status} <- signed do
+        assert status == 400,
+               "#{label(operation)} is signature-authenticated and its malformed body was " <>
+                 "signed, yet it answered #{status}. A signed body that is not JSON must be " <>
+                 "a 400 — that is the only way this operation's 400 is reachable at all."
+      end
 
       for {operation, reachable} <- Enum.sort(probed) do
         declared = Map.has_key?(responses[operation], "400")
@@ -644,6 +684,122 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
 
   defp idempotent_in_router?(operation) do
     MapSet.member?(guarded_operations(), operation)
+  end
+
+  # The one operation whose malformed body has to be AUTHENTIC to reach its 400,
+  # read from the document rather than written down here. A list of exceptions is a
+  # check that can only fail for an operation somebody remembered to type — the
+  # failure mode this file's own moduledoc is about — and this one is derivable:
+  # it is every operation the document gives the `webhookSignature` scheme, and the
+  # scheme is declared once in `components.securitySchemes`.
+  #
+  # The body is signed over the malformed bytes on purpose. That is the only shape
+  # that reaches the status: `CourierWeb.Plugs.ParseBody` skips this route, so the
+  # bytes courier verifies are the bytes that arrive, and `Courier.Inbound.Resend`
+  # is what refuses them as `:invalid_json`.
+  defp provoke_malformed_body(operation) do
+    if signed_webhook?(operation) do
+      body = "{not json"
+      {body, headers} = Courier.TestSupport.FakeResend.signed(body)
+
+      conn =
+        headers
+        |> Enum.reduce(build_conn(), fn {name, value}, acc ->
+          put_req_header(acc, name, value)
+        end)
+        |> put_req_header("content-type", "application/json")
+        |> dispatch(CourierWeb.Endpoint, :post, fill(elem(operation, 1), @id), body)
+
+      conn.status
+    else
+      provoke(operation, malformed_body: true)
+    end
+  end
+
+  # Whether the document gives this operation the signature scheme rather than a
+  # bearer token. Read from the document text rather than from the router's
+  # pipelines, so the two are compared against each other: a document that claimed
+  # `bearerAuth` on a signature-authenticated operation would be skipped by this
+  # probe and its 400 would be reported unreachable.
+  #
+  # A path key is at indent 2 and its operations are deeper, which is the same two
+  # levels `Courier.TestSupport.OpenAPIPaths` derives — and it is **derived from
+  # the document** rather than assumed to be two and four for the same reason: a
+  # check that hard-codes the indentation of somebody else's file is a check that
+  # reports nothing when the file is reindented.
+  defp signed_webhook?(operation) do
+    {_method, path} = operation
+
+    case operation_block(path) do
+      nil ->
+        false
+
+      block ->
+        Enum.any?(block, fn {_indent, text, _n} -> String.contains?(text, "webhookSignature") end)
+    end
+  end
+
+  defp operation_block(path) do
+    # The levels are derived from the document's own `paths:` block, not from the
+    # whole file: a path key is at the first level *under* `paths:`, and taking the
+    # first level of the whole document instead lands on `openapi: 3.1.0` and finds
+    # nothing. This is the same two-level derivation
+    # `Courier.TestSupport.OpenAPIPaths.levels!/1` does, for the same reason —
+    # four-space YAML has to read correctly rather than read as empty.
+    lines = document_lines()
+
+    with {_indent, _text, start} <-
+           Enum.find(lines, fn {indent, text, _n} -> indent == 0 and text == "paths:" end),
+         block =
+           lines
+           |> Enum.drop_while(fn {_i, _t, n} -> n <= start end)
+           # Bounded at the next column-0 key, or the block runs on through
+           # `components:` and the derived "path level" is 0 — which finds no path
+           # and silently answers "this operation is not signature-authenticated"
+           # for every operation in the document.
+           |> Enum.take_while(fn {indent, _t, _n} -> indent > 0 end),
+         [path_level | _rest] <- block |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.sort() do
+      case Enum.find(block, fn {indent, text, _n} ->
+             indent == path_level and String.trim_trailing(text, ":") == path
+           end) do
+        nil ->
+          nil
+
+        {indent, _text, number} ->
+          block
+          |> Enum.drop_while(fn {_i, _t, n} -> n <= number end)
+          |> Enum.take_while(fn {i, _t, _n} -> i > indent end)
+      end
+    else
+      _no_paths_block -> nil
+    end
+  end
+
+  # `{indent, text, number}` for every line that is not a comment or blank, which
+  # is the same preprocessing `Courier.TestSupport.OpenAPIPaths.significant_lines/1`
+  # does and is needed here for the same reason: a comment in the document's header
+  # is indented like YAML and would otherwise be read as a path key.
+  #
+  # `String.trim_leading/2` strips the given string as a **unit**, not a set of
+  # characters, so `"  # a comment" |> String.trim_leading("# ")` is unchanged. The
+  # comments are therefore dropped on their own recognisable prefix, after the
+  # leading spaces are measured.
+  defp document_lines do
+    @document
+    |> File.read!()
+    |> String.split("\n")
+    |> Enum.with_index(1)
+    |> Enum.flat_map(fn {line, number} ->
+      stripped = String.trim_leading(line, " ")
+
+      if stripped == "" or String.starts_with?(stripped, "#") do
+        []
+      else
+        [
+          {String.length(line) - String.length(stripped), String.trim_trailing(stripped), number}
+        ]
+      end
+    end)
   end
 
   # Provokes the 409 that only exists when a key is presented twice. The first

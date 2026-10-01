@@ -48,6 +48,35 @@
 #         than a field silently discarded.
 #
 #     None of this changes `exposes` below, which already pointed at the document.
+#   - `POST /inbound/resend` is the provider webhook courier receives signed
+#     deliverability reports on, and the document is at `2.2.0` because of it — one
+#     additive operation, a new `webhookSignature` security scheme and three new
+#     reusable responses, with no existing path, verb, request field or response
+#     shape changed. Two things are load-bearing about it:
+#
+#       * **It is the first operation in the document that is not behind a bearer
+#         token.** An inbound provider webhook is signed rather than
+#         JWT-authenticated — core's `docs/openapi-conventions.md` §Auth says so
+#         explicitly — so it declares `security: [{webhookSignature: []}]` and the
+#         document-level `security: [bearerAuth: []]` still describes the other
+#         nine. It is deliberately **outside `/v1`**, which is this service's
+#         contract with a tenant: a generated client for a path under `/v1` sends a
+#         bearer token, and this one cannot use it.
+#       * **It takes no `Idempotency-Key`,** and the document's header says why — a
+#         provider's retry identity is its signature, and the deduplication is the
+#         unique index on `(provider, provider_event_id)` rather than a header no
+#         provider sends. `openapi_error_responses_test.exs` reads the document and
+#         the router against each other for the header, so a route that gained the
+#         plug without the document, or the reverse, fails there.
+#
+#     Its 400 is reachable only with a valid signature, and that is a security
+#     property rather than a gap — so the check that provokes each status per
+#     operation signs its malformed body for this one. The correction is in
+#     `openapi_error_responses_test.exs` and says so where it is made.
+#
+#     The events it emits are `courier.email.bounced` and `courier.email.complained`,
+#     which the list below already declared. They now have a caller, written in the
+#     same transaction as the suppression row.
 #   - Every operation in `openapi.yaml` requires authentication, and the two
 #     `notification_preferences` operations used to be documented as served
 #     WITHOUT it — because that is what the router did, which was a
@@ -59,6 +88,8 @@
 #     `1.4.0` sends no token and receives a 401, which is a major `info.version`
 #     and a regenerated SDK. There was no 2.x client to regenerate, which is the
 #     only reason this was the cheap moment rather than somebody's build break.
+#     The inbound operation is the one entry in this file with a `security` other
+#     than `bearerAuth`, and it is not a reopening of that gap.
 #   - `consumes` is empty. courier is not subscribed to anything yet; when it
 #     starts reacting to identity or billing events this is the list, and every
 #     entry has to come with an idempotent consumer, because delivery is
@@ -82,12 +113,21 @@ core: ^0.2.0
 # relays it; `Courier.EventsTest` checks this list against
 # `Courier.Events.types()`. As of courier-21 that is also true of the HTTP path:
 # `POST /v1/messages` reaches the same `Courier.Deliver`, so a message sent over
-# HTTP emits the same event with the same guarantees. The other four are declared
-# and not yet emitted — a catalog entry is a promise, not a claim.
-# `email.bounced` and `email.complained` need a provider webhook, which is a later
-# packet; `email.suppressed` will follow it, and
-# `Courier.Suppressions` holds the facts it would carry without a route exposing
-# them.
+# HTTP emits the same event with the same guarantees.
+#
+# `email.bounced` and `email.complained` are emitted as of this packet too:
+# `POST /inbound/resend` writes each one to `outbox_events` in the **same
+# transaction** as the suppression row it belongs to, so there is no suppression
+# without the announcement and no announcement about a mailbox courier does not
+# hold. The one gap is stated rather than papered over: a report whose
+# `Message-ID` names no send courier made records its suppression and publishes no
+# event, because core's schema requires a `user_id` the report does not carry and
+# `Courier.InboundReports` reads it back off the send rather than inventing it.
+#
+# `courier.email.queued` still has no builder, because the send path is
+# synchronous and has no backlog for a queue-depth metric to measure, and
+# `courier.notification.suppressed` has a builder and no caller, because
+# `Courier.Deliver`'s moduledoc still promises no event for a send it refused.
 exposes:
   # courier's first documented HTTP surface. Written to core's
   # `docs/openapi-conventions.md`: `/v1` prefix, `info.version` present, problem+json
