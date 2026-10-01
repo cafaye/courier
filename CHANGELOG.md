@@ -14,6 +14,102 @@ document lands in both files in one commit, because core asserts the two agree.
 
 ### Added
 
+- **courier hears what happened to a message, and a hard-bounced address stops
+  being mailed.** `Courier.Suppressions.ingest/1` was written, tested and
+  documented as "the HTTP surface's entry point" — and nothing called it. The
+  suppression table was therefore only ever written by tests, permanently empty in
+  production, and a customer whose address hard-bounced was mailed again forever.
+  That is how a sending domain's reputation dies, killed by the list meant to
+  prevent it. `POST /inbound/resend` is the missing caller.
+  - **The route is authenticated by a SIGNATURE, not a token, and it is outside
+    `/v1`.** Both halves are the same argument: a provider is not a tenant. Resend
+    signs with Svix and sends no bearer token, so behind
+    `CourierWeb.Plugs.Principal` every delivery is a `401`; and behind no plug at
+    all it is an unauthenticated `POST` that records suppressions, which anyone
+    who finds the URL can use to suppress anyone's mail. Core's conventions settle
+    it — "Inbound webhooks are **not** JWT-authenticated: they are signed, per the
+    sender's convention, and the receiver checks the signature before parsing."
+    Outside `/v1` because that prefix is courier's contract with a *tenant* and
+    `PLAN.md` MD6 generates client SDKs from `openapi.yaml`: an operation filed
+    there that cannot take a bearer token is a method a generated client calls
+    wrongly.
+  - **The order is mechanical, not a convention.** The signature is verified
+    before the body is parsed, and **`CourierWeb.Plugs.ParseBody` now skips this
+    route** — it is an *endpoint* plug, so it ran on every request, and
+    `Plug.Parsers` would have decoded an unauthenticated body with the `:json`
+    parser before the verifier ever saw it. Spec §Signature scheme names
+    parse-then-re-serialize as "a very common failure mode" of verification, and
+    the verifier's refusal of anything but the received bytes is only the right
+    refusal if nothing upstream already rewrote them. The skip is keyed on a list
+    the **router** owns, and `router_test.exs` asserts every path in it is a route
+    the router serves, so a rename cannot leave it behind.
+  - **Three statuses, because the three refusals are three different problems.**
+    An unauthenticated request is a **401** whatever its body — a `400` would
+    confirm that courier decoded a forged payload. A body courier cannot classify
+    is a **422** with `errors[]` naming the field, because a `200` would be courier
+    claiming it did something with a report it could not read. And a courier with
+    no inbound secret is a **500** naming the variable, because
+    `Courier.Inbound.Signature`'s moduledoc raises the objection directly: a route
+    answering 401 to its own misconfiguration is indistinguishable from one under
+    attack, "and the operator's first question would be the wrong one".
+  - **A redelivery is a 200, and there is no `Idempotency-Key`.** A provider
+    retrying a webhook it got no answer for is *normal*, not an error. The
+    deduplication is `email_suppressions`'s unique index on
+    `(provider, provider_event_id)`, which `Courier.Inbound.Resend` derives from
+    the report's own **content** rather than from the `webhook-id` header — a
+    stronger key, because one delivery can name many recipients and keying on the
+    header would collapse a broadcast into one suppression and go on mailing four
+    of five bounced addresses for ever. The header a provider sends is one no
+    provider sends, and `CourierWeb.Plugs.Idempotency` is scoped to a principal
+    this route has none of, deliberately.
+  - **No response on this operation carries an email address.** Not the `200`
+    counts, not a `422`'s `detail`, not a value echoed back from the payload.
+    `email_suppressions` has no `account_id` and is not exposed through any route,
+    so an address in a response is a way to query mailboxes courier holds — the
+    same posture as the 409 on `POST /v1/messages`, which does not echo one
+    either. The address is in courier's **logs**, which is where the parser's
+    refusals put it, and `inbound_controller_test.exs` asserts a canary address is
+    absent from all six of the answers its six requests produce.
+  - **`COURIER_INBOUND_RESEND_SECRET` is required in prod and never defaulted.**
+    Unset, every hard bounce and complaint is *discarded* while
+    `POST /v1/messages` goes on mailing addresses that have permanently refused —
+    the failure `Courier.Suppressions` exists to prevent, through the door meant
+    to prevent it. It is the secret courier **verifies** with, copied from the
+    provider's dashboard, and deliberately NOT the outbound signing secret: a
+    deployment that leaked a customer's outbound secret must not thereby be able
+    to forge inbound suppressions. One variable **per provider**, because a shared
+    variable would make a second provider's configuration an edit to the first's.
+  - **The body is bounded at 1 MiB before it is read.** The route is
+    unauthenticated, an unbounded read is a denial of service handed to whoever
+    finds the URL, and every documented provider report is a few kilobytes. The
+    bound lives in `CourierWeb.InboundController.max_body_bytes/0` so the test
+    that pads a body over it does not hard-code a copy of the number.
+
+- **`courier.email.bounced` and `courier.email.complained` have a caller.** The
+  previous packet added the builders, and an event builder with nothing behind it
+  is the same lie as a catalog entry with nothing behind it. An accepted report
+  now publishes its event, in the **same transaction** as the suppression row, so
+  there is no suppression without the announcement and no announcement about a
+  mailbox courier does not hold.
+  - **`user_id` and `notification_type` are READ BACK from the send, not carried
+    across.** `core/schemas/events/courier/email/bounced.schema.json` requires
+    them and sets `additionalProperties: false`; a provider report carries a
+    `Message-ID` and a recipient and never a user, and an event with a `null` user
+    id is a payload core's own schema rejects on the bus. So courier joins
+    `email_suppressions.message_id` to the `outbox_events` row `Courier.Deliver`
+    wrote for that send and reads the fields it validated there. The test proves
+    the join by really sending a message through `POST /v1/messages` and using the
+    `message_id` the provider would have quoted.
+  - **A report courier cannot tie to a send records its suppression and publishes
+    no event**, with a log line naming the `Message-ID`. That is the one gap and
+    it is in the DATA, not the mechanism — and it rolls the safe way: the row is
+    the load-bearing half, so the transaction commits rather than throwing away
+    the fact that stopped the mail because an announcement could not be built.
+  - **A duplicate publishes nothing**, which is what makes a redelivery free: the
+    second delivery is a `{:ok, :duplicate, row}` and never reaches the event
+    write, so a `courier.email.bounced` is published once per bounce **by
+    construction** rather than by a check somebody has to remember.
+
 - **courier reports errors, and the report cannot carry what a redaction boundary
   exists to keep out of one.** Error reports carry request context, so they are a
   second path by which a credential, a prompt or a piece of PII could leave the
@@ -47,7 +143,6 @@ document lands in both files in one commit, because core asserts the two agree.
     mailbox and opens no socket. The *receiving* half is still exercised, with a
     recording sink standing in for GlitchTip.
 
-||||||| 717cd5d
 - **courier can actually send mail, and it refuses to boot if it cannot.**
   A buyer installs courier, sets their SMTP credentials, sends a notification, and
   it arrives. That was not true before: `Swoosh.Adapters.Local` was configured in
@@ -793,9 +888,14 @@ envelope, and the relay. What is worth naming:
   empty and nothing subscribes courier to identity or billing events.
 - **No NATS.** The relay publishes to a stand-in. Gnat is `config :courier,
   :nats_publisher` and a module that declares the behaviour.
-- **No push, no inbound webhooks, no bounce or complaint handling.** The other
-  four catalogued event types are declared and not emitted; `email.bounced` and
-  `email.complained` need a provider webhook before they mean anything.
+- **No push, no inbound webhooks from anyone but Resend, and no event for a
+  report courier cannot tie back to a send.** `email.bounced` and
+  `email.complained` are emitted now, and `email.queued` and
+  `notification.suppressed` are still declared and not emitted — the send path is
+  synchronous and has no backlog, and `Courier.Deliver` still promises no event
+  for a send it refused. A report whose `Message-ID` names no `outbox_events` row
+  records its suppression and publishes no event, because core's schema requires
+  a `user_id` courier would otherwise have to invent.
 - **Templates are EEx, not HEEx.** This dependency set has no HEEx engine
   (`phoenix_template` 1.1, no LiveView, no `phoenix_component`) and the brief's
   "no dependency without approval" rule outranks the packet's wording. The one
