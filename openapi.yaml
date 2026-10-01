@@ -594,34 +594,34 @@ paths:
                               The Standard Webhooks signing secret, base64
                               encoded behind the `whsec_` prefix. Shown once.
 
-                              The example below is a placeholder, and is built
-                              so that anyone who checks can see that it is:
-                              base64-decoding it yields the ASCII string
-                              `thisIsAnExampleSigningSecretOnly`. It matches
-                              the pattern and the 32-byte length the spec
-                              requires, and it is not a credential that has
-                              ever existed. A real response carries 32 random
-                              bytes, which base64-decode to nothing readable.
+                              This field deliberately carries NO example value.
+                              A secret of this kind is not usefully
+                              exemplified — the only real one a caller will
+                              ever see is the one this response hands back,
+                              and a made-up example in a public specification
+                              costs more than it teaches: GitHub's secret
+                              scanning matches the `whsec_`-plus-base64 SHAPE
+                              rather than the content, this repository is
+                              public, and every realistic example value pushed
+                              here opened an alert that somebody then had to
+                              resolve. Five were opened on 2026-10-01 and all
+                              five were documentation or test fixtures.
 
-                              A note for whoever comes here from a GitHub
-                              secret-scanning alert, as happened with all five
-                              alerts opened on this repository on 2026-10-01:
-                              the scanner matches the `whsec_`-plus-base64
-                              SHAPE, not the content, so this placeholder and
-                              any other realistic example will be flagged every
-                              time the shape appears. That is an accepted and
-                              documented cost of keeping a usable example in a
-                              public specification, not a leak to chase. If an
-                              alert points at a `whsec_` value that decodes to
-                              readable filler, or at svix's published worked
-                              example in `test/courier/inbound/signature_test.exs`
-                              — which pins signature verification against a
-                              party other than this repository and should not
-                              be removed to satisfy a scanner — resolve it as a
-                              false positive or used-in-tests. An alert on a
-                              value that decodes to nothing readable is a real
-                              one: stop, rotate, and investigate.
-                            examples: ['whsec_dGhpc0lzQW5FeGFtcGxlU2lnbmluZ1NlY3JldE9ubHk=']
+                              The `pattern` above is the machine-readable
+                              contract: `whsec_`, then base64. A conforming
+                              secret is 32 random bytes, so it base64-decodes
+                              to nothing readable — which is also the quick
+                              way to tell a real one from a fixture. The
+                              third-party test vector in
+                              `test/courier/inbound/signature_test.exs` is
+                              svix's own published worked example and is the
+                              one intentional literal in this repository; it
+                              pins signature verification against a party
+                              other than this repository and should not be
+                              removed to satisfy a scanner. An alert on any
+                              other `whsec_` value that decodes to nothing
+                              readable is a real one: stop, rotate, and
+                              investigate.
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '406': { $ref: '#/components/responses/NotAcceptable' }
