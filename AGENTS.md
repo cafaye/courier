@@ -22,6 +22,9 @@ PLAN.md §2 forbids copying from it.
 lib/courier/health.ex                 readiness check: does the database answer
 lib/courier/release.ex                migrations from inside a release, no Mix
 lib/courier/mailer.ex                 the Swoosh mailer: the adapter is config
+lib/courier/mailer_adapter.ex         the provider adapter, read from the
+                                      environment, and the refusal that stops
+                                      courier booting into a silent one
 lib/courier/mailers.ex                compose the three transactional emails
 lib/courier/mailers/templates/        the bodies, compiled at build time
 lib/courier/deliver.ex                the send: preference, provider, outbox row
@@ -72,6 +75,12 @@ lib/courier_web/router.ex             probes at the root, /v1 for the API
 test/courier/health_test.exs          the readiness check, on its own
 test/courier/mailers_test.exs         what the platform hands in, per message
 test/courier/mailers_config_test.exs  the sender and the subject are config
+test/courier/smtp_delivery_test.exs   THE PROOF: a real send through a real
+                                      SMTP adapter to a real gen_smtp server on
+                                      a real socket, and the failure paths
+test/courier/mailer_adapter_test.exs  the adapter courier refuses to ship
+                                      without, and the two boot gates
+test/courier/mailer_adapter_credentials_test.exs  a password never reaches a log
 test/courier/deliver_test.exs         the three promises, in one transaction
 test/courier/deliver_adapter_test.exs what happens when the provider says no
 test/courier/notification_preferences_test.exs  defaults, writes, rejections
@@ -107,6 +116,9 @@ test/support/header_resolver.ex       a principal that reads a header
 test/support/test_dns.ex              a resolver that answers from a table
 test/support/test_span_exporter.ex    the exporter that records instead of sending
 test/support/test_spans.ex            reading those spans, and RAISING on empty
+test/support/smtp_server.ex           a real SMTP server for the round-trip test:
+                                      :gen_smtp_server on a kernel-assigned
+                                      loopback port
 gate.yml                              the gate, DECLARED: command, proof, what it needs
 kit.ref                               the pinned kit commit the stack comes from
 bin/prime                             the gate: deps, database, tests
@@ -148,6 +160,51 @@ floor for library consumers; do not pin an exact version there.
 **No dependency without approval.** The generated Phoenix 1.8 app is the whole
 dependency list. Swoosh, Oban, Broadway, and the HTTP clients for the webhook
 pipeline are Phase 3 packets — not this one, not "just to prepare".
+
+**A mailer with no adapter that can reach a provider is a silent default, and
+that is worse than a crash.** courier ships `{:swoosh, "~> 1.28"}` and
+`{:gen_smtp, "~> 1.0"}`, and the second one is the load-bearing half: swoosh
+declares `gen_smtp` OPTIONAL and `Swoosh.Adapters.SMTP` declares it REQUIRED, so
+naming swoosh alone compiles a courier whose only shipped adapter is
+`Swoosh.Adapters.Local` — which renders into memory, returns a provider-shaped id
+and opens no socket. That is the state this repository was in: a paid product
+that accepted every send, wrote an outbox row for each, published a `delivered`
+event, and mailed nobody. No error, no warning. Three rules came out of it:
+
+  * **The adapter has no default, and prod will not boot without one.** Not
+    "warned about" — refused. A running courier that cannot send is worse than
+    one that will not start, because the damage is outbox rows and events
+    claiming delivery, for mail that was never delivered, and nothing in a
+    dashboard shows it. `Courier.MailerAdapter.adapter!/1` raises in
+    `config/runtime.exs`; `Courier.Application` re-checks the EFFECTIVE adapter
+    as a second, independent gate — the same input twice would catch nothing, so
+    the second one reads `Application.get_env` rather than the environment.
+  * **`Swoosh.Adapters.Test` and `Swoosh.Adapters.Local` are named in
+    `Courier.MailerAdapter.silent_adapters/0` and asserted as a set.** A third
+    silent adapter has to be classified, or the set test fails. `none` is
+    permitted in dev and refused in prod; the value is a NAME from a fixed set,
+    never a module name, so the silent adapter cannot be named through the front
+    door the refusal was built to close.
+  * **An adapter no test can exercise is an adapter nobody has checked.** So
+    `gen_smtp` is in EVERY environment, not `only: :prod`, and
+    `test/courier/smtp_delivery_test.exs` drives real sends through the real
+    adapter to a real `:gen_smtp_server` on a real kernel-assigned loopback port.
+    Mocking the adapter would prove the mock works. The mutation is the proof:
+    point those tests at `Local` or `Test` and five of the six fail.
+
+**A credential is never in a log, and never in a committed file.** At SMTP a
+"username" is usually an API key, so `Courier.MailerAdapter.describe/1` prints
+the host, the port and whether auth is on, and omits *both* credentials — the
+startup line an operator reads is not where a password belongs.
+`test/courier/mailer_adapter_credentials_test.exs` captures real log output from
+real sends and asserts the secret is ABSENT, which is the assertion worth more
+than "it logged something": a boundary that deletes everything passes that. Two
+tests in it are about the repository rather than about a call — no committed
+`config/*.exs` may carry `username:`/`password:`/`relay:` inside a
+`config :courier, Courier.Mailer` block — and they are scoped to the mailer's own
+block because `config/test.exs` legitimately commits `password: "postgres"` for
+the test database. A scan loosened until it goes green is a scan that has stopped
+looking.
 
 One packet has been approved since, and the two names it added are
 `{:opentelemetry, "~> 1.7"}` and `{:opentelemetry_exporter, "~> 1.11"}`: the
@@ -191,9 +248,9 @@ two can disagree, one of them is lying. The workflow adds a database, the tier
 counts and the lockfile guard *around* that command; it does not reimplement it.
 
 **A tier that CI cannot name is a tier nobody ran.** The suite partitions
-exactly, by the case template: 306 tests in the 15 files that never touch
+exactly, by the case template: 356 tests in the 18 files that never touch
 `Courier.Repo`, 372 in the 19 that do, and `mix test` is aliased to
-`ecto.create` first, so a runner with no database executes *zero* of the 678 —
+`ecto.create` first, so a runner with no database executes *zero* of the 728 —
 SSRF table included. Both counts are asserted in CI by `bin/assert-suite`, and
 the SSRF table gets its own 62-test run so the log carries a line that can only
 exist if that harness ran. **When you add or delete a test, raise the floor in
@@ -420,6 +477,36 @@ And one this packet added for observability, which is optional everywhere:
   unguarded line would replace the suite's in-memory exporter with a real one —
   and every redaction test asserts the **absence** of a canary, so with nothing
   exporting they would all go green having proved nothing.
+
+And eight from the provider adapter, all read from `config/runtime.exs` by
+`Courier.MailerAdapter`, **required in every environment including test** and
+never committed to a config file. Only the four with a correct default are
+defaulted (`COURIER_SMTP_PORT` 587, `COURIER_SMTP_AUTH` and `COURIER_SMTP_TLS`
+`always`, `COURIER_SMTP_SSL` `false`); the adapter itself is required, because an
+adapter with a default is wrong for exactly the deployments nobody is watching.
+
+- **`COURIER_MAIL_ADAPTER`** — `smtp`, the only adapter courier ships. `none` is
+  `Swoosh.Adapters.Local` and is **refused in production**. Unset is a boot
+  failure, not a fallback to `none`. A module name is not a value: the variable
+  names a provider from a fixed set, so `Swoosh.Adapters.Local` cannot be spelled
+  here even if somebody wants it to.
+- **`COURIER_SMTP_HOST`** — required when the adapter is `smtp`.
+- **`COURIER_SMTP_USERNAME`** / **`COURIER_SMTP_PASSWORD`** — required unless
+  `COURIER_SMTP_AUTH=never`, because `gen_smtp` refuses `auth: :always` without
+  both halves at the socket, and a per-send failure there is the same defect one
+  layer out.
+- **`COURIER_SMTP_AUTH`** — `always` (default), `never`, `if_available`.
+- **`COURIER_SMTP_TLS`** — `always` (default), `never`, `if_available`.
+- **`COURIER_SMTP_SSL`** — `false` by default; `true` for implicit TLS, usually
+  on 465.
+
+An empty string counts as **unset** for all of them: `SMTP_PASSWORD=` in a compose
+file produces `""`, and an empty password sent to a provider comes back as a 535
+the operator has no way to explain. Losing `COURIER_MAIL_ADAPTER` means courier
+does not start, which is the point — it is the cheapest possible way to find out,
+and it happens before the first customer mail rather than after a support ticket.
+
+For templates, without a relay: `COURIER_MAIL_ADAPTER=none mix phx.server`.
 
 ## Toolchain
 

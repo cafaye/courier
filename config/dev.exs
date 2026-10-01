@@ -62,8 +62,21 @@ config :phoenix, :stacktrace_depth, 20
 # Initialize plugs at runtime for faster development compilation
 config :phoenix, :plug_init_mode, :runtime
 
-# Transactional email in dev goes to the Local adapter: it renders into memory,
-# returns a provider-shaped message id, and never opens a socket. Dev cannot
-# accidentally mail a real person. The Swoosh preview plug is deliberately not
-# wired — courier has no HTML layer to preview into.
-config :courier, Courier.Mailer, adapter: Swoosh.Adapters.Local
+# Transactional email in dev. `COURIER_MAIL_ADAPTER=none` is the way to get the
+# Local adapter — it renders into memory, returns a provider-shaped message id,
+# and never opens a socket, so dev cannot accidentally mail a real person.
+#
+# It is NOT set here, and that is the change this packet made. A committed
+# `adapter: Swoosh.Adapters.Local` is a silent default: it applies to every
+# developer who has not overridden it, it is invisible in a diff, and it is the
+# exact configuration that shipped. The adapter now comes from the environment
+# (config/runtime.exs, via `Courier.MailerAdapter`), which is unset here — so a
+# developer who starts courier without setting it gets a refusal naming the
+# variable rather than a mailer that silently works.
+#
+# To work on courier's templates without a relay:
+#
+#     COURIER_MAIL_ADAPTER=none mix phx.server
+#
+# The Swoosh preview plug is deliberately not wired — courier has no HTML layer to
+# preview into.

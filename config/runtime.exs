@@ -76,11 +76,44 @@ if config_env() == :prod do
               System.get_env("MAIL_FROM", from_address)}
          )
 
-  # No provider adapter ships in this packet. The Local adapter renders into
-  # memory and returns a provider-shaped message id, so a released courier
-  # exercises the whole pipeline without mailing anyone; the provider packet
-  # replaces this line with the provider adapter and its credentials.
-  config :courier, Courier.Mailer, adapter: Swoosh.Adapters.Local
+  # THE PROVIDER ADAPTER, and the refusal is the point.
+  #
+  # This line used to be:
+  #
+  #     config :courier, Courier.Mailer, adapter: Swoosh.Adapters.Local
+  #
+  # which is the failure this packet exists to end. `Local` renders a message
+  # into memory and returns a provider-shaped id without opening a socket, so a
+  # released courier accepted every send, recorded an outbox row for each one,
+  # published a `delivered` event, and mailed nobody. No error and no warning —
+  # the worst failure a paid product can have, because it looks like it works.
+  #
+  # What replaced it is `Courier.MailerAdapter.adapter!/1`, which reads
+  # COURIER_MAIL_ADAPTER and the COURIER_SMTP_* variables and RAISES if they are
+  # unset, if they name an adapter courier does not ship, or if they name one
+  # that cannot deliver. A raise here stops the boot. `Courier.Application`
+  # re-checks the resolved adapter as a second, independent gate.
+  #
+  # Nothing is defaulted. An adapter with a default is an adapter that is wrong
+  # for exactly the deployments nobody is watching, and a required setting is the
+  # only version of this that cannot be forgotten.
+  #
+  # Bound to a variable and called ONCE: `adapter!/1` raises on a misconfigured
+  # deployment, and calling it twice would mean a boot that raised after the
+  # config had already been applied — leaving the process half-configured rather
+  # than cleanly stopped.
+  mailer_adapter = Courier.MailerAdapter.adapter!(:prod)
+
+  config :courier, Courier.Mailer, mailer_adapter
+
+  # The one startup line an operator reads to confirm which relay courier is
+  # pointed at. It names the host, the port and whether auth is on — never the
+  # username and never the password, because at SMTP a "username" is very often
+  # the API key. See `Courier.MailerAdapter.describe/1` and the credential tests
+  # that assert the absence rather than trusting this comment.
+  require Logger
+
+  Logger.info("mailer: #{Courier.MailerAdapter.describe(mailer_adapter)}")
 
   # The key every webhook signing secret is sealed under (`Courier.SecretBox`).
   # It is required rather than defaulted, because a default would be a key in

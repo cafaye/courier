@@ -106,7 +106,21 @@ defmodule Courier.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
+      # Transactional email. `swoosh` is courier's mail composition and delivery
+      # pipeline; `gen_smtp` is the socket `Swoosh.Adapters.SMTP` actually speaks
+      # through, and swoosh declares it OPTIONAL, so naming swoosh alone compiles a
+      # courier that has no provider adapter that can reach a provider at all.
+      # That was the state before this packet: `Courier.Mailer` existed, the
+      # Local adapter was configured in prod, and nothing was declared that could
+      # open a connection — see lib/courier/mailer_adapter.ex.
+      #
+      # `gen_smtp` is in EVERY environment, and test is where it earns that: the
+      # suite drives real sends through a real SMTP conversation on a real socket
+      # (test/support/smtp_server.ex). An adapter that is `only: :prod` is an
+      # adapter no test can exercise, which is the same silent default wearing a
+      # different hat.
       {:swoosh, "~> 1.28"},
+      {:gen_smtp, "~> 1.0"},
       {:oban, "~> 2.24"},
       # Webhook delivery needs an HTTP client. Req is the one this repository's own
       # generated rules name as preferred ("Use the already included and available

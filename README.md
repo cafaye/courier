@@ -34,7 +34,7 @@ half and adds the two jobs kit cannot own:
 
 Two things a reader should know before trusting a green run:
 
-- **The floors are decrease detectors, not targets.** 678 tests, 306 of them
+- **The floors are decrease detectors, not targets.** 728 tests, 356 of them
   without a database, 372 with it, and 62 in the SSRF table. Delete one and CI
   goes red. Add one and CI goes red until the floor is raised, which is the
   intended direction.
@@ -131,6 +131,33 @@ the document's header and in the test's exclusion list, with the reason.
 A route added to `lib/courier_web/router.ex` is not finished until it is in
 `openapi.yaml`, and an operation added to `openapi.yaml` is not finished until
 the router serves it.
+
+## Sending mail
+
+courier delivers transactional email over SMTP. The provider is a deployment
+decision, read from the environment at boot, and courier **refuses to start**
+without one:
+
+```sh
+COURIER_MAIL_ADAPTER=smtp
+COURIER_SMTP_HOST=smtp.your-provider.com
+COURIER_SMTP_USERNAME=...          # required unless COURIER_SMTP_AUTH=never
+COURIER_SMTP_PASSWORD=...
+COURIER_SMTP_PORT=587              # the default
+COURIER_SMTP_AUTH=always           # always | never | if_available
+COURIER_SMTP_TLS=always            # always | never | if_available
+COURIER_SMTP_SSL=false             # true for implicit TLS, usually on 465
+```
+
+`COURIER_MAIL_ADAPTER=none` renders mail into memory and opens no socket. It is
+refused in production: a courier that reports a message id for mail it never sent
+is the worst failure a paid product can have, because it looks like it works.
+
+Credentials are read from the environment in every environment, are never
+written to a committed config file, and never appear in a log line — including
+the startup line, which names the host and port and deliberately omits the
+username as well as the password, because at SMTP a username is usually an API
+key.
 
 ## Not here yet
 

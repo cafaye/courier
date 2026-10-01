@@ -101,12 +101,22 @@ gate:
       # notification-preferences authentication gap and added its 14 tests —
       # which is the rule this floor exists to enforce. The value before that was
       # 560 against a measured 564, raised by courier-14 in the same commit that
-      # added the 52 `Idempotency-Key` tests. The `whole suite`, `no database` and
-      # `database` floors in CI moved with it — 678, 306 and 372, measured the
-      # same way and in the same run; the `database` tier did not move because not
-      # one of the 62 new tests touches `Courier.Repo`, which is what the tier is
-      # a count of.
-      minimum: 672
+      # added the 52 `Idempotency-Key` tests.
+      #
+      # 672 against a measured 678 was courier-17, which added the canary table.
+      # THIS value is the provider-adapter packet, whose 50 tests all live in
+      # files that never touch `Courier.Repo`: 6 driving real sends through a real
+      # `gen_smtp` server on a real socket, 33 on the adapter resolution and the
+      # two boot refusals, 11 on a credential never reaching a log. Measured 728,
+      # floor 722 — the same margin of 6 as every ratchet above it, which is
+      # small on purpose and is NOT licence to lower a floor.
+      #
+      # The CI floors moved with it, measured the same way and in the same run:
+      # `whole suite` 678 → 728, `no database` 306 → 356. The `database` tier did
+      # NOT move, and did not need to: not one of these 50 tests touches
+      # `Courier.Repo`, which is what that tier counts. The SSRF table did not
+      # move either — 62, unchanged, because no URL guard was touched.
+      minimum: 722
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres
