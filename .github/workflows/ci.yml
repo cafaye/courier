@@ -29,7 +29,7 @@
 #      second thing to be wrong.
 #
 #   3. The tier counts. The floors below are courier's numbers, in courier's
-#      tree. No other repository has 372 database tests or a 62-case SSRF table.
+#      tree. No other repository has 513 database tests or a 62-case SSRF table.
 #
 #   4. The lockfile guard, the coverage floor, and the release build: all three
 #      are courier's lockfile, courier's threshold, and courier's release.
@@ -199,7 +199,7 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 918
+          bin/assert-suite "$log" "whole suite (bin/prime)" 964
       #
       # Measured on the tree carrying `POST /v1/messages`, from a complete run.
       # Whole suite 918. The tiers are the point of recording it, and BOTH of them
@@ -226,8 +226,17 @@ jobs:
       # floor nobody re-measures: the *floor* stayed green because it is a decrease
       # detector, while the *labels* above it quietly stopped describing the tree.
       # Both were wrong and only one of them would have failed a build.
+      #
+      # Re-measured on the tree carrying `Courier.Events`' three new builders:
+      # whole suite 964, no database 451, database 513 — and 964 is again the sum
+      # of the two tiers. Only the no-database tier moved, by exactly 46, and it
+      # moved for the reason a tier is allowed to move: every one of the 46 is in
+      # `test/courier/events_test.exs`, which builds envelopes and reads
+      # `cafaye.yml` and touches no `Repo`. The database tier did not move and its
+      # floor is untouched — the builders are shapes, and nothing in this packet
+      # wired one of them to a send.
 
-      - name: tier — no database (405 tests, 20 files)
+      - name: tier — no database (451 tests, 20 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -258,7 +267,7 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 405
+          bin/assert-suite "$log" "no database" 451
 
       - name: tier — database (513 tests, 24 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
@@ -359,8 +368,8 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 918 passed | \`bin/assert-suite\` |"
-            echo "| no database, 20 files | 405 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 964 passed | \`bin/assert-suite\` |"
+            echo "| no database, 20 files | 451 passed | tier step |"
             echo "| database, 24 files | 513 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"

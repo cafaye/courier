@@ -7,6 +7,12 @@ defmodule Courier.Events do
   and `Courier.EventsTest` restates them here so drift shows up in courier's own
   suite instead of in core's.
 
+  Each event's `data` is core's contract too, one schema per type at
+  `schemas/events/<service>/<entity>/<action>.schema.json`. Every builder below
+  names the schema it was written against, because the payload is a promise to
+  the *other* services on the bus and a publisher that owns its own payload shape
+  is describing something none of them read.
+
   The catalog is the short list. `types/0` must agree, entry for entry, with
   `exposes.events` in this repository's `cafaye.yml` — the test says so — and
   both are courier's row in `core/docs/event-naming.md`. Registering a new type
@@ -20,14 +26,43 @@ defmodule Courier.Events do
   the envelope's `source` and the manifest's `name`, so a type says who emitted
   it without a lookup.
 
-  `delivered/1` is the only builder in this packet: courier emits
-  `courier.email.delivered` and nothing else yet. The other four catalogued types
-  are declared and not yet emitted — a catalog entry is a promise, not a claim.
+  ## A builder is a shape, not an emission
+
+  Four of the five catalogued types have a builder here and `courier.email.queued`
+  does not. The two statements are different on purpose, because collapsing them
+  is the lie this module used to be in the shape of:
+
+    * `courier.email.delivered` has a builder **and** a caller. `Courier.Deliver`
+      writes the row in the transaction that sent the mail.
+    * `courier.email.bounced` and `courier.email.complained` have builders and no
+      caller, because courier has no inbound surface to learn a bounce or a
+      complaint from. A builder that fabricates the moment a bounce happened would
+      be worse than no builder: it would publish an event about a message nobody
+      reported, which is the same class of lie as a catalog entry with nothing
+      behind it.
+    * `courier.notification.suppressed` has a builder and no caller yet either,
+      even though the refusal it describes — `{:error, :suppressed}` and
+      `{:error, {:suppressed_address, state}}` out of `Courier.Deliver` — happens
+      today and `POST /v1/messages` already answers it. Whether courier writes an
+      outbox row for a send it refused is a decision for the module that owns the
+      send, and `Courier.Deliver`'s own moduledoc currently says "no event" for
+      both refusals. That sentence is the thing to argue with; this builder is
+      deliberately not the thing that changes it silently.
+
+  `courier.email.queued` has no builder because courier has no queue. The send path
+  is synchronous and documented as such — the provider is dialled inside the
+  request — and that type exists to make a *backlog* visible. With no backlog
+  there is no moment at which courier could honestly emit it, and an acceptance
+  event with no queue behind it would be a queue-depth metric reading zero for
+  structural reasons.
   """
 
   @specversion "1.0"
   @source "courier"
   @delivered "courier.email.delivered"
+  @bounced "courier.email.bounced"
+  @complained "courier.email.complained"
+  @suppressed "courier.notification.suppressed"
 
   @types ~w(
     courier.email.queued
@@ -36,6 +71,18 @@ defmodule Courier.Events do
     courier.email.complained
     courier.notification.suppressed
   )
+
+  # schemas/events/courier/notification/suppressed.schema.json:
+  # properties.reason.enum. Transcribed from core rather than invented here,
+  # because a caller writing the refusal's reason should be picking from a set
+  # somebody else published rather than spelling a string and hoping. It is a
+  # superset of what courier can produce today and that is deliberate: `reason` is
+  # core's enum, and narrowing it here would make a `rate_limited` refusal
+  # unpublishable rather than unimplemented. Which of the three courier can reach
+  # is `Courier.Deliver`'s to say — `:suppressed` is a user declining,
+  # `{:suppressed_address, _}` is a previous bounce or complaint, and
+  # `rate_limited` has no producer because the send path has no rate limiter.
+  @reasons ~w(preference_off address_suppressed rate_limited)
 
   @doc """
   Every event type courier is allowed to publish, in the order `cafaye.yml`
@@ -78,11 +125,151 @@ defmodule Courier.Events do
   end
 
   @doc """
+  The type of the `courier.email.bounced` event, on the same terms as
+  `delivered_type/0`: the type is the NATS subject.
+  """
+  @spec bounced_type() :: String.t()
+  def bounced_type, do: @bounced
+
+  @doc """
+  The `email.bounced` envelope for one message that hard-bounced.
+
+  `subject` is the notification that failed — courier's own message id, and the
+  one the send wrote into the RFC 5322 `Message-ID` header, so the bounce that
+  arrives days later joins to the send that caused it. `data` is that send's own
+  four fields, `message_id` / `user_id` / `notification_type` / `email`, exactly
+  as `core/schemas/events/courier/email/bounced.schema.json` requires.
+
+  **No provider diagnostic**, and that is core's schema rather than a gap in
+  courier: the file says so in its own description, because no publisher emits a
+  bounce code. It arrives with the receiver, and when one does, the field is a
+  patch to core's schema and not a key in this map — an `additionalProperties:
+  false` payload rejects the extra field rather than ignoring it.
+
+  **This builder does not say what courier did about the bounce.** The
+  suppression that follows is a separate fact, written by `Courier.Suppressions`
+  and never exposed through a route. A subscriber gets the failure here and reads
+  the consequence by attempting the next send, which is the honest order: the
+  event is about the message, and the list is about the mailbox.
+  """
+  @spec bounced(keyword()) :: map()
+  def bounced(opts) when is_list(opts) do
+    envelope(%{
+      id: Ecto.UUID.generate(),
+      type: @bounced,
+      source: @source,
+      subject: Keyword.fetch!(opts, :subject),
+      time: DateTime.truncate(DateTime.utc_now(), :second),
+      data: Keyword.get(opts, :data, %{})
+    })
+  end
+
+  @doc """
+  The type of the `courier.email.complained` event, on the same terms as
+  `delivered_type/0`.
+  """
+  @spec complained_type() :: String.t()
+  def complained_type, do: @complained
+
+  @doc """
+  The `email.complained` envelope for one message the recipient reported as spam.
+
+  Field for field the same payload as `bounced/1` — core specifies both against
+  `message_id`, `user_id`, `notification_type` and `email` — and the subject is
+  the notification again, because the `Message-ID` the complaint quotes is the
+  same header and the same id.
+
+  **The two are kept apart even though their payloads are identical**, and the
+  reason is that they are different facts with different consequences and different
+  readers. A bounce is a fact about a *mailbox*: RFC 5321 §5.1.1 permanent
+  failure, and the operator's response is list hygiene. A complaint is an
+  instruction from a *person*: RFC 2142 §5, a "report spam", and the operator's
+  response is a content and sender-reputation problem that no per-address
+  suppression fixes. Publishing both as one type would leave a consumer unable to
+  tell which it is looking at, and `Courier.Suppressions` keeps the two states
+  distinct for exactly that reason.
+
+  `notification_type` is here for the same reason it is on the bounce: a
+  complaint suppresses the address for every type immediately, so what the type
+  is tells a consumer what the user objected to rather than what to stop sending.
+  """
+  @spec complained(keyword()) :: map()
+  def complained(opts) when is_list(opts) do
+    envelope(%{
+      id: Ecto.UUID.generate(),
+      type: @complained,
+      source: @source,
+      subject: Keyword.fetch!(opts, :subject),
+      time: DateTime.truncate(DateTime.utc_now(), :second),
+      data: Keyword.get(opts, :data, %{})
+    })
+  end
+
+  @doc """
+  The type of the `courier.notification.suppressed` event, on the same terms as
+  `delivered_type/0`.
+  """
+  @spec suppressed_type() :: String.t()
+  def suppressed_type, do: @suppressed
+
+  @doc """
+  Every value `courier.notification.suppressed`'s `reason` can carry, transcribed
+  from `core/schemas/events/courier/notification/suppressed.schema.json`.
+
+  Core's enum, not a narrower one: courier can reach two of the three today
+  (`preference_off`, `address_suppressed`) and `rate_limited` has no producer,
+  but the payload schema belongs to core and a fourth value is not courier's to
+  publish and not courier's to remove. `Courier.EventsTest` asserts this list
+  against that transcription, so the two cannot drift apart quietly.
+  """
+  @spec reasons() :: [String.t()]
+  def reasons, do: @reasons
+
+  @doc """
+  The `notification.suppressed` envelope for one send courier refused.
+
+  **The subject is the user id and not the notification, and that is the one thing
+  about this envelope the other three do not do.** Nothing was rendered, nothing
+  was addressed and nothing left, so there is no message to name; and core's
+  catalog calls this type's subject "the recipient", which core's D8
+  (`DECISIONS.md`) settles as the **user id** rather than the address — an address
+  is mutable and `subject` is the per-entity ordering key, so a correlation key
+  that the recipient can change is a key that moves under a consumer.
+
+  So `subject` here is a bare uuid from identity, and `data` is
+  `user_id` / `notification_type` / `email` / `reason` — **no `message_id`**, which
+  is not an omission courier made but the schema itself: there was no message.
+  `data.email` is here so a consumer can join on whichever the manager picks
+  without re-reading anybody's data.
+
+  The refusal itself is `Courier.Deliver`'s, and this builder describes it rather
+  than deciding it: `{:error, :suppressed}` is a user declining and maps to
+  `preference_off`, `{:error, {:suppressed_address, _}}` is a previous bounce or
+  complaint and maps to `address_suppressed`. Which of them to publish is the
+  send path's call, and `Courier.Deliver`'s moduledoc currently promises the
+  opposite — "no mail, no event, no record of a send that did not happen". That is
+  deliberate on both sides: this module's moduledoc says a builder is not an
+  emission, and a builder that quietly overrode the send path's stated promise
+  would be deciding policy in the one file whose job is shapes.
+  """
+  @spec suppressed(keyword()) :: map()
+  def suppressed(opts) when is_list(opts) do
+    envelope(%{
+      id: Ecto.UUID.generate(),
+      type: @suppressed,
+      source: @source,
+      subject: Keyword.fetch!(opts, :subject),
+      time: DateTime.truncate(DateTime.utc_now(), :second),
+      data: Keyword.get(opts, :data, %{})
+    })
+  end
+
+  @doc """
   The envelope for an emission whose attributes are already known.
 
   One definition of the seven attributes, so the row `Courier.OutboxEvent`
-  records and the message `Courier.Workers.ProcessOutboxWorker` publishes are
-  the same shape by construction rather than by two modules agreeing.
+  records and the message `Courier.Workers.ProcessOutboxWorker` publishes are the
+  same shape by construction rather than by two modules agreeing.
   `additionalProperties: false` in core's schema: an extra attribute is a
   validation failure, not an extension point.
   """

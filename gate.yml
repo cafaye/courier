@@ -98,14 +98,19 @@ gate:
       # described this tree — a floor is a claim about the tree it lives in, so it
       # is measured on the tree it lives in.
       #
-      # 918 measured with `./bin/prime` on this branch, and it is the sum of the two
-      # CI tiers measured the same way in the same run: 405 with no database and 513
-      # with one. The +65 over the previous 853 is this packet's 61 send-surface
-      # tests plus the 4 `router_test.exs` assertions, and **both tiers moved**,
-      # which is what distinguishes a floor measured on this tree from one copied
-      # forward. The `no database` tier moved only because the router assertions
-      # touch no database; every send-surface test goes through `CourierWeb.ConnCase`
-      # and therefore belongs to the other tier.
+      # Remeasured on the tree carrying `Courier.Events`' three new builders: 964
+      # whole-suite tests, so 958 with the same margin of 6. 964 is the sum of the
+      # two CI tiers measured the same way in the same run: 451 with no database and
+      # 513 with one. Only the no-database tier moved, by exactly 46, and every one
+      # of those 46 is in `test/courier/events_test.exs` — a file that builds
+      # envelopes, reads `cafaye.yml` and calls no `Repo`. A tier that moves because
+      # its own subject grew is counting what it claims; one that moves by
+      # coincidence is a coincidence somebody later has to explain. The database tier
+      # did not move and its floor is untouched: a builder is a shape, and nothing
+      # in that packet wired one of them to a send. The incoming 918 whole-suite
+      # tests were 405 and 513, the +65 over the previous 853 being the
+      # send-surface packet's 61 tests plus the 4 `router_test.exs` assertions, and
+      # **both tiers moved** then.
       #
       # The previous value here was 816 against a measured 822, remeasured on the
       # MERGED tree after the provider-adapter packet. The value before that was 624
@@ -117,7 +122,7 @@ gate:
       # the same commit that added the 52 `Idempotency-Key` tests. Every one of
       # those is this rule: the floor moves in the same commit that changes what
       # courier verifies.
-      minimum: 912
+      minimum: 958
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres
