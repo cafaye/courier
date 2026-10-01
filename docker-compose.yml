@@ -100,6 +100,27 @@ services:
       #     openssl rand -base64 32
       COURIER_SECRET_BOX_KEY: "${COURIER_SECRET_BOX_KEY:?set COURIER_SECRET_BOX_KEY, or run: openssl rand -base64 32}"
 
+      # ---------------------------------------------------------------------
+      # WHO COURIER ASKS ABOUT ITS CALLERS
+      #
+      # The resolver is `Courier.Principal.Introspection` outside test
+      # (`config/runtime.exs`), so this stack cannot serve an authenticated
+      # request without identity. It is NOT in `depends_on`, deliberately and for
+      # the same reason the collector is not: a service that refuses to serve
+      # while a dependency is down teaches people to run without the dependency,
+      # which is worse than answering 503. courier starts, serves `/healthz`,
+      # `/readyz` and the provider surface, and answers 503 with
+      # `code: unavailable` on everything behind `CourierWeb.Plugs.Principal`.
+      #
+      # `COURIER_IDENTITY_URL` is by compose service name, like the collector
+      # above. `COURIER_IDENTITY_TOKEN` is courier's OWN scoped API token —
+      # a credential, so it is required from the host environment and never
+      # committed here. Mint one with `POST /v1/accounts/{account_id}/api-keys`
+      # against an identity account that belongs to courier and to nothing else.
+      # ---------------------------------------------------------------------
+      COURIER_IDENTITY_URL: http://identity:4000
+      COURIER_IDENTITY_TOKEN: "${COURIER_IDENTITY_TOKEN:?set COURIER_IDENTITY_TOKEN, or mint one with POST /v1/accounts/{account_id}/api-keys}"
+
     # THE CRASH LAYER, and it is the reason a panic reaches an operator with no
     # per-language log SDK in it.
     #

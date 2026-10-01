@@ -193,13 +193,66 @@ answers `Migrations already up`. Whoever adds the first migration decides
 whether compose grows a migrate service or the deploy pipeline calls
 `bin/migrate` directly.
 
+## Who is calling
+
+Every operation under `/v1` is behind `CourierWeb.Plugs.Principal`, and outside
+test that plug resolves the caller through `Courier.Principal.Introspection`:
+courier reads the caller's token from `Authorization: Bearer` and asks identity
+`POST /v1/introspections` what it may do and for which account.
+
+The token is **opaque**. It is `cafaye_` plus random bytes and identity's row
+holds a SHA-256 of it, so there is no claim document inside it and no published
+key set to verify one against — asking identity is the only way to learn an
+`account_id`. That makes authentication a network hop on every `/v1` request, and
+the price is stated rather than assumed: **courier's latency now includes
+identity's, and identity's outage is courier's outage.** Both surface as a `503`
+`unavailable`, which is the retryable status.
+
+| environment variable | required | what it is |
+| --- | --- | --- |
+| `COURIER_IDENTITY_TOKEN` | **in prod** | courier's own scoped API token, presented as the `Authorization` header on the introspection call. A credential: mint one with `POST /v1/accounts/{account_id}/api-keys` in an account that belongs to courier and nothing else, and rotate by minting a new one, redeploying, and revoking the old. |
+| `COURIER_IDENTITY_URL` | no | identity's base URL. Defaults to `http://identity:4000`, the compose-network name. A wrong URL is a loud `503`, not a crash. |
+
+Four things about the boundary, each one tested:
+
+  * **`account_id` and never `sub`.** `sub` is the user a token names;
+    `account_id` is the tenancy boundary. An active document with no
+    `account_id` is refused, and the account is read with `Map.fetch/2` so a
+    fallback is not expressible in the function that decides it.
+  * **One answer for every unusable token.** Unknown, revoked, expired and
+    orphaned are all `200 {"active": false}` upstream; courier does not
+    re-expand them, so no status distinguishes them.
+  * **Both scope claim names are read.** `scopes` and `scope` are emitted
+    byte for byte because the fleet has not agreed on one (MD7, open), so
+    courier reads the union and assumes neither is the only one. A claim that
+    is not a **string** is refused rather than read as an empty set.
+  * **Scopes are parsed and deliberately NOT enforced.** identity's vocabulary
+    is six names and none of them is one of the five `openapi.yaml` declares,
+    so a check written today would refuse every credential identity can mint.
+    Tenancy is what courier enforces. The decision is recorded in
+    `Courier.Principal`'s moduledoc and in `openapi.yaml`'s `bearerAuth`.
+
+**`Courier.Principal.Reject` is still the fallback** for a deployment whose
+configuration names no resolver, and it is still correct for that case: it
+answers 401 to everything. The plug's 401 is unchanged — `type`, `code`, `status`,
+`title`, `detail` and `instance` are identical through either resolver, and a
+test asserts it rather than promising it.
+
+**No answer is never "allow".** identity unreachable, slow, erroring, answering
+401 or 403, or answering in a shape courier cannot read is a **503**. A
+resolver that fails open under load is worse than the locked door courier shipped
+for a year, because it fails silently.
+
 ## Layout
 
 ```
 lib/courier/health.ex                          readiness check, never raises
-lib/courier_web/controllers/health_controller.ex  the two probes
+lib/courier/principal.ex                       the caller, the resolver behaviour
+lib/courier/principal/introspection.ex         who is calling, via identity
+lib/courier/principal/introspection/document.ex  its answer, read in three answers
+lib/courier_web/plugs/principal.ex             401, or 503 when nobody can ask
 lib/courier_web/router.ex                      probes at the root, /api reserved
-test/courier/…                                  readiness check, unit
+test/courier/…                                  readiness check, the door, unit
 test/courier_web/…                              probes incl. the DB-down path, routes
 .github/workflows/ci.yml                        calls kit, plus gate and release
 bin/prime                                       the gate: deps, database, tests

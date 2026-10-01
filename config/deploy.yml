@@ -186,6 +186,12 @@ env:
     COURIER_SMTP_AUTH: always
     COURIER_SMTP_TLS: always
     COURIER_SMTP_SSL: "false"
+    # Where identity is. An ADDRESS and not a secret, so it lives here rather
+    # than in `.kamal/secrets` — the same reasoning as COURIER_OTEL_ENDPOINT
+    # above. `config/runtime.exs` defaults it to `http://identity:4000`, and this
+    # line is written out so that the file says what a deploy of courier will
+    # authenticate against rather than leaving it to be inferred from a default.
+    COURIER_IDENTITY_URL: http://identity:4000
   secret:
     # The database URL. It carries a password, which is why it is a secret and
     # never a clear value: at runtime it will be in the container's
@@ -208,6 +214,11 @@ env:
     #                                ingest surface authenticates with
     #   COURIER_SMTP_USERNAME        the SMTP username, which is usually an API key
     #   COURIER_SMTP_PASSWORD        the SMTP password
+    #   COURIER_IDENTITY_TOKEN       raises when unset; courier's own scoped API
+    #                                token, which it presents to identity's
+    #                                introspection endpoint to learn who is
+    #                                calling. See `Courier.Principal.Introspection`
+    #                                for what it is and how it is rotated.
     #
     # WHAT IS DELIBERATELY NOT LISTED, because listing it is a trap:
     # `COURIER_ERROR_REPORTING_DSN` and `COURIER_ERROR_SINK_DSN` are optional
@@ -215,13 +226,15 @@ env:
     # refuses a name in `env.secret` that has no value in `.kamal/secrets`. An
     # optional credential therefore cannot be named here at all — it is set in
     # the deployment's environment, and the omission is a real limit rather than
-    # an oversight.
+    # an oversight. The same is why `COURIER_IDENTITY_URL` is in `clear` above:
+    # it is an address, and Kamal would refuse a secret name with no value.
     - SECRET_KEY_BASE
     - COURIER_SECRET_BOX_KEY
     - COURIER_INBOUND_RESEND_SECRET
     - COURIER_ERROR_RELAY_TOKEN
     - COURIER_SMTP_USERNAME
     - COURIER_SMTP_PASSWORD
+    - COURIER_IDENTITY_TOKEN
     - KAMAL_REGISTRY_PASSWORD
 
 # Credentials for the image host. The password is a NAME, resolved from

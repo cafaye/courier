@@ -72,6 +72,83 @@ if config_env() != :test do
   config :opentelemetry, Courier.Telemetry.sdk_config()
 end
 
+# ---------------------------------------------------------------------------
+# WHO IS CALLING. The resolver, its address, and its credential.
+#
+# `Courier.Principal.Introspection` is the module `config :courier, :principal`
+# names outside test, and it asks identity `POST /v1/introspections` about the
+# token an inbound request carries. It replaced `Courier.Principal.Reject`, which
+# authenticated nobody and therefore answered 401 to every authenticated request
+# in a deployed courier.
+#
+# `Courier.Principal.Reject` IS STILL THE FALLBACK and is still correct for the
+# case it answers: `CourierWeb.Plugs.Principal.resolver/0` defaults to it, so a
+# deployment whose configuration lost this line locks rather than opens. The
+# difference the packet makes is that a locked door is now a state you have to
+# configure your way out of rather than the only state there is.
+#
+# IN EVERY ENVIRONMENT EXCEPT TEST, and the guard is the same one the
+# OpenTelemetry block above uses and for the same reason: `runtime.exs` runs AFTER
+# `config/test.exs`, so an unguarded line here would replace the suite's
+# `HeaderResolver` with the real resolver, and every test in the authorization
+# matrix — the ones that assert which account may do what to which endpoint — would
+# be asserting against a dial to a service that is not running.
+# ---------------------------------------------------------------------------
+if config_env() != :test do
+  config :courier, :principal, Courier.Principal.Introspection
+
+  # WHERE identity is, and it has a default on purpose.
+  #
+  # The asymmetry with the token below is the whole decision. A wrong URL is a
+  # 503 on every authenticated request: loud, diagnosable, retriable, and it does
+  # not stop the process — so making a dependency's address a boot requirement
+  # would turn "identity moved" into a stop-the-world upgrade gate for a service
+  # that is otherwise fine. `http://identity:4000` is the compose-network name,
+  # the same shape as `COURIER_OTEL_ENDPOINT`'s default.
+  config :courier,
+         :identity_url,
+         System.get_env("COURIER_IDENTITY_URL", "http://identity:4000")
+end
+
+if config_env() == :prod do
+  # courier's OWN credential for asking identity about callers, and it is
+  # **required**. A scoped API token, minted by an operator in an identity
+  # account that belongs to courier and to nothing else:
+  #
+  #     POST /v1/accounts/{account_id}/api-keys
+  #
+  # Rotation is identity's, and it is three steps rather than a feature: mint a
+  # new key, redeploy with the new value, revoke the old one. There is no cache
+  # to invalidate — see `Courier.Principal.Introspection`'s moduledoc for why
+  # there is not one, which is a security property and not an oversight.
+  #
+  # IT IS A SECRET AND IT IS HERE, not in `config/config.exs`: a committed
+  # credential is a credential in git, and every deployment which forgot to set
+  # one would authenticate callers with it.
+  #
+  # Required rather than defaulted, for the same reason `COURIER_SECRET_BOX_KEY`
+  # above is: unset, courier cannot authenticate anybody, and a courier that
+  # cannot authenticate anybody is a service that cannot serve — which is the
+  # state this whole packet exists to end. Discovering it at boot is the cheapest
+  # possible way to find out, and it happens before the first customer request
+  # rather than after a support ticket.
+  config :courier,
+         :identity_token,
+         System.get_env("COURIER_IDENTITY_TOKEN") ||
+           raise("""
+           environment variable COURIER_IDENTITY_TOKEN is missing.
+
+           It is courier's own credential for identity's introspection endpoint —
+           the scoped API token an operator mints with
+           POST /v1/accounts/{account_id}/api-keys — and courier presents it as the
+           Authorization header when it asks "who is calling?".
+
+           Unset, courier answers 503 to every authenticated request: courier is
+           fine, its credential is not, and a 503 says so where a 401 would tell a
+           customer to rotate a token that was never the problem.
+           """)
+end
+
 # The From address of every transactional email is deployment configuration:
 # an operator sets MAIL_FROM / MAIL_FROM_NAME and redeploys, nobody commits a
 # changed address. Subjects stay in config/config.exs — they are product copy,

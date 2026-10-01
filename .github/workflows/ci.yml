@@ -199,7 +199,7 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 1150
+          bin/assert-suite "$log" "whole suite (bin/prime)" 1212
       #
       # Remeasured on the tree carrying `config/kamal-backup.yml` and
       # `config/deploy.yml`: whole suite 1156, which is 577 with no database and
@@ -227,23 +227,47 @@ jobs:
       # "what this does not cover" section has to be rewritten — which is the
       # mechanism, not the intention.
       #
-      # 1156 is also 577 + 579, which is the consistency check worth making: a
-      # whole suite that is not the sum of its own tiers is a suite where a file
-      # has been left out of both.
+      # **1218 is 623 + 595**, which is the consistency check worth making: a whole
+      # suite that is not the sum of its own tiers is a suite where a file has been
+      # left out of both.
       #
-      # The previous value here was 1134 (561 + 573) on the tree carrying the
+      # **REMEASURED on the tree carrying the door opener, and the split is the
+      # design rather than an accident.** courier-26 adds 62 tests that split
+      # **46 / 16**:
+      #
+      #   * the no-database tier grew by 46, from
+      #     `test/courier/principal/introspection/document_test.exs` (17),
+      #     `test/courier/principal/introspection_test.exs` (18) and
+      #     `test/courier/principal/introspection/transport_req_test.exs` (11) —
+      #     three files that touch no `Courier.Repo` and assert the whole of
+      #     `Courier.Principal.Introspection`. That placement is the point: the
+      #     authentication boundary is the one part of this service that must be
+      #     checkable on a runner with NO database, and a resolver whose tests need
+      #     postgres are not checked at all on the machine where the database is the
+      #     thing that is missing. It is the same tier that proves a `mix test` with
+      #     no server executes zero tests is caught.
+      #   * the database tier grew by 16, from
+      #     `test/courier_web/plugs/principal_config_test.exs`, a
+      #     `CourierWeb.ConnCase` because its subject is the RESPONSES: the 401, the
+      #     503, the halt, and `openapi.yaml`'s declaration of the 503 on every
+      #     operation behind the principal plug. A status asserted on the plug
+      #     rather than over a real request is a status no client ever receives, and
+      #     a document-vs-router check needs the router.
+      #
+      # The previous values here were 1156 (577 + 579) on the tree carrying
+      # `config/kamal-backup.yml`, and 1134 (561 + 573) on the tree carrying the
       # inbound provider surface, and before that 1073 (535 + 538), measured on the
-      # MERGED tree carrying `Courier.Inbound` and `Courier.Events`, and before
-      # that 918, which is the number the send-surface packet moved from. 918 was
-      # in turn measured rather than copied forward — and the packet before it
-      # recorded that the suppression packet (90d95f7) added 31 database tests and
-      # raised NOTHING here, so the `database` floor said 421 while the tier
-      # actually held 452. That is the failure mode of a floor nobody re-measures:
-      # the floor stayed green because it is a decrease detector, while the labels
-      # above it quietly stopped describing the tree. Both were wrong and only one
-      # of them would have failed a build.
+      # MERGED tree carrying `Courier.Inbound` and `Courier.Events`, and before that
+      # 918, which is the number the send-surface packet moved from. 918 was in turn
+      # measured rather than copied forward — and the packet before it recorded that
+      # the suppression packet (90d95f7) added 31 database tests and raised NOTHING
+      # here, so the `database` floor said 421 while the tier actually held 452.
+      # That is the failure mode of a floor nobody re-measures: the floor stayed
+      # green because it is a decrease detector, while the labels above it quietly
+      # stopped describing the tree. Both were wrong and only one of them would have
+      # failed a build.
 
-      - name: tier — no database (577 tests, 25 files)
+      - name: tier — no database (623 tests, 28 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -274,9 +298,9 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 577
+          bin/assert-suite "$log" "no database" 623
 
-      - name: tier — database (579 tests, 28 files)
+      - name: tier — database (595 tests, 29 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
         # and therefore through the Ecto SQL sandbox: the SQL layer, the
         # migrations `mix ecto.setup` applies, Oban's tables, and the
@@ -300,7 +324,7 @@ jobs:
             echo "::error::the database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "database" 579
+          bin/assert-suite "$log" "database" 595
 
       - name: tier — the SSRF table (62 tests, in-memory resolver)
         # courier-03's table, run on its own so the log carries a line that can
@@ -375,9 +399,9 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 1156 passed | \`bin/assert-suite\` |"
-            echo "| no database, 25 files | 577 passed | tier step |"
-            echo "| database, 28 files | 579 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 1218 passed | \`bin/assert-suite\` |"
+            echo "| no database, 28 files | 623 passed | tier step |"
+            echo "| database, 29 files | 595 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
             echo "| mix.lock | no diff after the gate | lockfile step |"

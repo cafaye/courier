@@ -96,10 +96,40 @@ config :courier, :webhook_sender, Courier.TestSupport.RecordingSender
 
 # The principal resolver in test. It reads the account from a request header so
 # the authorization matrix can be asserted over real requests; it is a stand-in
-# for identity's JWT verifier and is only ever configured here. The shipped
-# default, `Courier.Principal.Reject`, authenticates nobody — see
+# for identity's verifier and is only ever configured here. The shipped default,
+# `Courier.Principal.Reject`, authenticates nobody, and
+# `Courier.Principal.Introspection` is what every other environment gets — see
 # `lib/courier_web/plugs/principal.ex`.
 config :courier, :principal, Courier.TestSupport.HeaderResolver
+
+# The introspection transport, and it is a table rather than a socket so the
+# resolver's tests assert courier's DECISION — what it sends, and what it does
+# with each answer — rather than that `Req` can open a connection.
+# `Courier.Principal.Introspection.Transport.Req`, the one that actually dials, is
+# exercised against Req's own plug adapter in
+# `test/courier/principal/introspection/transport_req_test.exs`, because a seam
+# tested from one side only is a seam nobody checked.
+config :courier, :introspection_transport, Courier.TestSupport.IntrospectionTransport
+
+# Req's own testing seam, pointed at a stub, so `Transport.Req` — the one that
+# really builds the request — is driven without a socket. Merged FIRST inside
+# `Transport.Req.post/3`, so the four decisions there (`retry: false`,
+# `redirect: false`, the 2s dial, `max_redirects: 0`) cannot be switched off by
+# anything a test or a deployment writes here.
+config :courier, :introspection_req_options, plug: {Req.Test, :courier_introspection}
+
+# Where identity is, for the resolver's own assertions. Never dialled in this
+# environment — the transport above answers instead — so a test that reached the
+# network would fail rather than pass quietly.
+config :courier, :identity_url, "http://identity.test:4000"
+
+# courier's OWN credential for introspection, and this is a FIXTURE and not a
+# default, on the same terms as `COURIER_SECRET_BOX_KEY` above: `config/runtime.exs`
+# requires a real one from the environment in prod and refuses to boot without it.
+# It is in the repository because the suite has to be able to assert that courier
+# presents THIS value and never the caller's — which is a claim nothing can check
+# without a value to check.
+config :courier, :identity_token, "cafaye_couriers-own-service-credential"
 
 # OpenTelemetry in test, and it is ON.
 #
