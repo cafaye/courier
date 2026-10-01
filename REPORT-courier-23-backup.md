@@ -336,6 +336,25 @@ Mutation 7 is the one worth noting: a `bytea` column for uploads trips **both**
 the "no file bytes" check and the "every table is courier's own" check, which is
 what stops the omission from staying silent.
 
+### The suite is not seed-stable, and that predates this packet
+
+Running the whole suite across 26 seeds on this branch and on `a8f15cc` (the merge
+before it) found failures in `Courier.ErrorRelayTest` and
+`Courier.TelemetryCanaryTest` — **3 of 16 seeds on master, 1 of 16 on this
+branch**, and `TelemetryCanaryTest`'s 404 case failed on 14 of 14 master runs at
+seed 55433. Both are pre-existing order-dependence in tests this packet did not
+touch, and the branch is not the cause: same seeds, same tests, master fails more
+often. The 22 tests added here were run across 10 seeds on their own and are
+**22/22 every time**.
+
+Not fixed, and stated rather than absorbed: `eventually/3` in
+`error_relay_test.exs` is a 200-iteration busy poll with no deadline, and
+`TelemetryCanaryTest` reads spans from a shared ETS table that an `async: false`
+test in another file can still be writing into. Both are real defects and both
+belong to a packet about them, not to one about backups. Fixing them here would
+have meant loosening an assertion, which is the one thing this repository's rules
+refuse.
+
 Three bugs were found and fixed while building the reader, all of the same family
 — a reader that under-reads and agrees with nothing:
 
