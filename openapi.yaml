@@ -593,7 +593,16 @@ paths:
                             description: |
                               The Standard Webhooks signing secret, base64
                               encoded behind the `whsec_` prefix. Shown once.
-                            examples: ['whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw']
+
+                              The example below is a placeholder, and is built
+                              so that anyone who checks can see that it is:
+                              base64-decoding it yields the ASCII string
+                              `thisIsAnExampleSigningSecretOnly`. It matches
+                              the pattern and the 32-byte length the spec
+                              requires, and it is not a credential that has
+                              ever existed. A real response carries 32 random
+                              bytes, which base64-decode to nothing readable.
+                            examples: ['whsec_dGhpc0lzQW5FeGFtcGxlU2lnbmluZ1NlY3JldE9ubHk=']
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '406': { $ref: '#/components/responses/NotAcceptable' }
