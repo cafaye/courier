@@ -790,7 +790,12 @@ defmodule CourierWeb.OpenAPIPathsTest do
       # is caught here rather than as a baffling failure in the check built on it.
       responses = Paths.document_responses!()
 
-      assert map_size(responses) == 8
+      # 9 operations, and the number is here to be changed in the commit that adds
+      # or removes one rather than to be discovered by the count assertion below
+      # firing on an unrelated edit. It is a tripwire, not the assertion: the check
+      # that matters is the loop underneath, which asks every non-2xx whether it is
+      # wired to courier's envelope.
+      assert map_size(responses) == 9
 
       for {_operation, declared} <- responses, {status, response} <- declared do
         if not String.starts_with?(status, "2") do
@@ -957,6 +962,7 @@ defmodule CourierWeb.OpenAPIPathsTest do
       operations = Paths.document_idempotency_keys!("openapi.yaml")
 
       assert Map.keys(operations) |> Enum.sort() == [
+               {"POST", "/v1/messages"},
                {"POST", "/v1/webhook_endpoints"},
                {"POST", "/v1/webhook_endpoints/{}/test"}
              ]

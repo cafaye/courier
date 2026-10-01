@@ -35,6 +35,41 @@ defmodule CourierWeb.RouterTest do
     end
   end
 
+  describe "the messages surface" do
+    alias CourierWeb.MessagesController
+
+    test "POST /v1/messages resolves to CourierWeb.MessagesController.create/2" do
+      assert %{plug: MessagesController, plug_opts: :create, route: "/v1/messages"} =
+               Phoenix.Router.route_info(Router, "POST", "/v1/messages", "")
+    end
+
+    test "it is behind the authenticated pipeline, and that is not a formality" do
+      # An unauthenticated POST to a mail egress is an open relay. This is the one
+      # route in courier where that is true rather than theoretical, so the pipeline
+      # is asserted here rather than left to the controller's own tests — which go
+      # through the same router and would agree with a router that did not have it.
+      assert %{pipe_through: pipelines} =
+               Phoenix.Router.route_info(Router, "POST", "/v1/messages", "")
+
+      assert :authenticated in pipelines, "POST /v1/messages must be behind authentication"
+    end
+
+    test "it is behind the idempotency pipeline, because a send is not idempotent" do
+      # A caller that timed out and retried without the header mails somebody
+      # twice, and no row afterwards can tell the two messages apart.
+      assert %{pipe_through: pipelines} =
+               Phoenix.Router.route_info(Router, "POST", "/v1/messages", "")
+
+      assert :idempotent in pipelines
+    end
+
+    test "it does not answer write methods other than POST" do
+      for method <- ~w(GET PUT PATCH DELETE) do
+        assert :error == Phoenix.Router.route_info(Router, method, "/v1/messages", "")
+      end
+    end
+  end
+
   describe "the webhook endpoints surface" do
     alias CourierWeb.WebhookEndpointsController
 

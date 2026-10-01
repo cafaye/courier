@@ -28,6 +28,26 @@
 #     the only omission, they are named in the document's header and in the test's
 #     exclusion list with the reason, and the test fails if that list stops naming
 #     a route the router serves.
+#   - `POST /v1/messages` is courier's only door into its send path, and it is
+#     the operation the platform's password reset, email verification, email
+#     change and team invitation flows are all waiting on. It is declared in the
+#     document at `2.1.0` — a minor bump, one additive operation, no change to
+#     any existing path. Two consequences worth naming here rather than leaving a
+#     reader to find them:
+#
+#       * `503 unavailable` is now a status courier sends on a customer operation,
+#         not only from `GET /readyz`. A send has a dependency courier does not
+#         control, and a send has to be able to say the provider refused. The
+#         document's header records the change and
+#         `test/courier_web/openapi_error_responses_test.exs` had its "unreachable"
+#         list corrected in the same commit rather than being deleted.
+#       * the document's `errors[].code` enum gained `unknown_field`, `required`,
+#         `unknown_notification_type` and `notification_preferences_disabled`, all
+#         emitted by the send surface. The vocabulary is closed on purpose, so a
+#         body carrying a field courier does not read is a 422 naming it rather
+#         than a field silently discarded.
+#
+#     None of this changes `exposes` below, which already pointed at the document.
 #   - Every operation in `openapi.yaml` requires authentication, and the two
 #     `notification_preferences` operations used to be documented as served
 #     WITHOUT it — because that is what the router did, which was a
@@ -60,13 +80,23 @@ core: ^0.2.0
 # `email.delivered` is emitted: `Courier.Deliver` writes it to `outbox_events` in
 # the same transaction as the send and `Courier.Workers.ProcessOutboxWorker`
 # relays it; `Courier.EventsTest` checks this list against
-# `Courier.Events.types()`. The other four are declared and not yet emitted — a
-# catalog entry is a promise, not a claim. `email.bounced` and `email.complained`
-# need a provider webhook, which is a later packet.
+# `Courier.Events.types()`. As of courier-21 that is also true of the HTTP path:
+# `POST /v1/messages` reaches the same `Courier.Deliver`, so a message sent over
+# HTTP emits the same event with the same guarantees. The other four are declared
+# and not yet emitted — a catalog entry is a promise, not a claim.
+# `email.bounced` and `email.complained` need a provider webhook, which is a later
+# packet; `email.suppressed` will follow it, and
+# `Courier.Suppressions` holds the facts it would carry without a route exposing
+# them.
 exposes:
   # courier's first documented HTTP surface. Written to core's
   # `docs/openapi-conventions.md`: `/v1` prefix, `info.version` present, problem+json
   # for every non-2xx, cursor pagination, and the auth stated per operation.
+  #
+  # As of courier-21 this is nine operations across three resources — webhook
+  # endpoints, notification preferences, and `POST /v1/messages`. It was already
+  # declared before that packet; what courier-21 added is the send operation and
+  # the `503` it can answer, not the pointer.
   api: openapi.yaml
 
   # Three segments, always: `<service>.<entity>.<action>` (core/docs/event-naming.md

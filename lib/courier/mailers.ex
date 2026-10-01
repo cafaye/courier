@@ -122,6 +122,35 @@ defmodule Courier.Mailers do
     with {:ok, email} <- build(type, payload), do: Mailer.deliver(email)
   end
 
+  @doc """
+  Whether a built message carries a body in at least one format.
+
+  The one thing about a rendered message that the renderer itself cannot be
+  trusted to get right, and it is checked here rather than at a caller because
+  the message is only in hand here.
+
+  Every template courier renders today produces both a text and an HTML body, so
+  this is green by construction and exists for the case where it would not be: a
+  template that renders empty, a layout that swallows its body, a format added
+  later without one. `Swoosh` accepts an email with no body at all and hands back a
+  provider-shaped id for it, so a bodiless message that reached a provider would
+  be reported as sent, written to the outbox, and published as
+  `courier.email.delivered` — the silent-default failure the whole adapter work
+  exists to end, reached by a different road.
+
+  Empty strings are **not** bodies. `""` renders to a mail a person opens and finds
+  blank, which is the same defect as no body with one more step of indirection.
+
+  Public and tested on hand-built messages because a predicate that only ever sees
+  messages it is guaranteed to accept is a predicate nothing has checked.
+  """
+  @spec body?(Swoosh.Email.t()) :: boolean()
+  def body?(%Swoosh.Email{text_body: text, html_body: html}), do: present?(text) or present?(html)
+
+  defp present?(nil), do: false
+  defp present?(body) when is_binary(body), do: String.trim(body) != ""
+  defp present?(_other), do: false
+
   # Type, then payload, then configuration: the two configuration errors are
   # reported after the caller's payload is known good, because a deployment that
   # is misconfigured should not hide a request that is also wrong.

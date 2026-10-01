@@ -92,6 +92,9 @@ test/support/sentry_test_client.ex    the SDK's transport, pointed at a test sin
                                       and its own database on the SAME postgres
 ops/glitchtip-database.sql            the store's role and database, idempotent
 lib/courier_web/problem.ex            core's problem+json envelope, built once
+lib/courier_web/messages.ex           the send surface's own rules: a CLOSED
+                                      vocabulary, and the mapping from `to` to the
+                                      payload's `email`
 lib/courier_web/plugs/trace.ex        a trace id and the path, for every request
 lib/courier_web/plugs/parse_body.ex   Plug.Parsers, with courier's 400
 lib/courier_web/plugs/principal.ex    who is calling; 401 when nobody is
@@ -100,6 +103,9 @@ lib/courier_web/plugs/problem_content_type.ex  a non-2xx is problem+json
 lib/courier_web/plugs/telemetry.ex     the request span: above the router, below
                                       the parsers, and route template not path
 lib/courier_web/controllers/health_controller.ex   GET /healthz, GET /readyz
+lib/courier_web/controllers/messages_controller.ex   POST /v1/messages, the only
+                                      door into Courier.Deliver, and the mapping
+                                      from every refusal to a status
 lib/courier_web/controllers/notification_preferences_controller.ex  GET/PUT /v1
 lib/courier_web/controllers/webhook_endpoints_controller.ex  the six /v1 actions
 lib/courier_web/controllers/error_json.ex        the errors Phoenix renders
@@ -133,6 +139,10 @@ test/courier/webhooks/payload_test.exs         the bytes on the wire
 test/courier/webhooks/sender_test.exs          the request and its classification
 test/courier/workers/                 the relay, the fan-out, and the sender
 test/courier_web/controllers/          the API, and the authorization matrix
+test/courier_web/controllers/messages_controller_test.exs  the send surface:
+                                      the refusals first, then the delivery
+test/courier_web/controllers/messages_controller_config_test.exs  the two
+                                      refusals that need the adapter swapped
 test/courier_web/router_test.exs      which controller, which scope, which methods
 test/courier_web/plugs/idempotency_test.exs  the header over real requests: one
                                            mutation, the replays, and the three 409s
@@ -279,16 +289,124 @@ the first.
 two can disagree, one of them is lying. The workflow adds a database, the tier
 counts and the lockfile guard *around* that command; it does not reimplement it.
 
+**The send path's HTTP door is `POST /v1/messages`, and its contract is
+`synchronous`.** The whole send happens inside the request — the preference is
+read, the suppression list is consulted, the provider is dialled, the outbox row
+is written — so the caller learns the real outcome rather than a receipt for an
+intention. **A 200 means the provider accepted the message for delivery and
+courier wrote the `courier.email.delivered` row in the same transaction; it does
+not mean the mail arrived**, because a submission protocol says nothing about
+arrival and courier has no receipt to report one with. `data.status` is therefore
+`accepted` and is never `delivered`: a field reading `delivered` would be courier
+claiming a fact about somebody else's inbox that it cannot know.
+
+The queued alternative was considered and is real — `Courier.Workers` exists and
+`oban` is already a dependency — and it loses on one requirement: **a 202 answers
+before the suppression check has run**, so a refusal arrives after the response and
+a caller who cannot tell "suppressed" from "sent" retries forever. The availability
+price of the synchronous choice is stated rather than assumed: courier holds a
+database transaction open across the provider's dial, and a slow provider makes
+this request slow. What makes it survivable is that the failure is honest (a 503
+with a code the caller retries) and the retry is free under an `Idempotency-Key`.
+
+**Three refusals, told apart by status and `code` and not by `detail`**, because a
+client branches on the code:
+
+| outcome | status | `code` | retry? |
+| --- | --- | --- | --- |
+| accepted for delivery | 200 | — | — |
+| the recipient's mailbox is suppressed | 409 | `conflict` | **no** |
+| the request is wrong, or the user declined this type | 422 | `validation_failed` | after fixing it |
+| the provider refused, or courier cannot deliver | 503 | `unavailable` | yes, same key |
+
+**A suppressed mailbox is a 409 and not a 422**, and the reason is that it is not a
+property of the request: a hard bounce and a spam complaint are facts about a
+*mailbox*, recorded by a provider and not chosen by this caller, and the table
+behind them is never exposed through any route — so this response is the only
+place the fact can surface. **A declined preference is a 422**, the opposite answer
+on purpose, because a decline is visible through
+`GET /v1/notification_preferences/{user_id}` and changeable through the `PUT` beside
+it, and `errors[]` — which core reserves for 422 and nothing else — can name `type`
+as the field at fault. One code for two different remedies would have been worse
+than either.
+
+The suppression response deliberately **does not echo the address** and carries no
+`errors[]`: `email_suppressions` has no `account_id` by design, so the 409 is a
+fact about a mailbox rather than about another tenant's data, and a status nobody
+can read the list through is the same posture the suppression packet took when it
+declined to expose one.
+
+**The send path consults suppression, and the controller does not.** Both live in
+`Courier.Deliver` — the preference first, then the mailbox — because a hard-bounced
+address does not get mail *whatever the caller asked for*, and every caller of that
+module is a caller of that promise. `Courier.DeliverTest` and the endpoint's own
+tests assert it from both sides; `messages_controller_test.exs` proves it from the
+library side precisely because a check that lived only in the controller would be a
+check the library could fail.
+
+**The send surface's vocabulary is closed, and that is the point.**
+`Courier.Mailers` casts a payload with `Ecto.Changeset.cast/3` against a fixed field
+list and **discards everything else without a word** — right for a library a trusted
+caller holds, wrong for a request body, where a misspelled `emai_enabled` would be
+accepted with no sign anything was ignored. So `CourierWeb.Messages` refuses an
+unknown key as a 422 naming it, and `account_id` is in that set: the account is
+`conn.assigns.current_account` and never the body's.
+
+**There is no `from` and no `text`/`html` in the request, and both absences are
+deliberate.** courier sends *transactional* mail it renders from its own templates.
+A caller that could choose the sender would be a phishing relay wearing the
+platform's sending domain, and the reputation cost lands on every other tenant's
+mail; raw bodies on the wire would make courier a general-purpose relay handing out
+every template, layout and escaping decision. So the sender and subjects stay
+configuration, and a body carrying `from` is a 422 naming `from`.
+
+What survives of "at least one of text/html" is `Courier.Mailers.body?/1`, a check
+on the **rendered** message called from `Courier.Deliver` where the message is the
+only thing in hand — and it is a 500 rather than a 422 when it fails, because the
+caller's request was fine and courier's own template rendered nothing. `Swoosh`
+delivers a bodiless email and answers a provider-shaped id, so without the check a
+message with nothing in it would be recorded as delivered and published as
+`courier.email.delivered`: the same silent default the adapter work refuses,
+reached by a different road. It is tested on hand-built messages as well as on a
+real render, because a predicate that only ever sees messages it is guaranteed to
+accept is a predicate nothing has checked.
+
+**The adapter gate is asked a third time, per request, and the reason is
+visibility.** `Courier.MailerAdapter` refuses to boot and `Courier.Application`
+re-checks the *effective* adapter; this action asks the same predicate again so the
+refusal reaches the caller as a 503 instead of being a boot-time property nobody
+sees. A courier that booted with a silent adapter would otherwise answer 200, write
+an outbox row and publish `courier.email.delivered` for mail nobody receives. It is
+scoped to `:prod` exactly as `verify_boot!/1` is, because `Test` and `Local` are the
+correct adapters in the environments that configure them — and reaching that scope
+from a test is why `MailerAdapter.config_env/0` reads application env rather than
+`Mix.env/0`.
+
+**A 503 on a customer operation is new, and it moved a list in
+`openapi_error_responses_test.exs` rather than being added to it.** That file's
+`@unreachable` map asserted that no operation declared a 503, because only
+`GET /readyz` sent one. A send has a dependency courier does not control, so the
+status became reachable and the fix was to **correct the list and say why** — which
+is what its own comment instructs. A third status left that map (409 in courier-14)
+and the second departure is what shows the map is a list and not a constant.
+
 **A tier that CI cannot name is a tier nobody ran.** The suite partitions
-exactly, by the case template: 356 tests in the 18 files that never touch
-`Courier.Repo`, 372 in the 19 that do, and `mix test` is aliased to
-`ecto.create` first, so a runner with no database executes *zero* of the 728 —
+exactly, by the case template: 405 tests in the 20 files that never touch
+`Courier.Repo`, 513 in the 24 that do, and `mix test` is aliased to
+`ecto.create` first, so a runner with no database executes *zero* of the 918 —
 SSRF table included. Both counts are asserted in CI by `bin/assert-suite`, and
 the SSRF table gets its own 62-test run so the log carries a line that can only
 exist if that harness ran. **When you add or delete a test, raise the floor in
 `.github/workflows/ci.yml` in the same commit.** Deleting a test to make CI green
 is caught by the floor; adding one is caught because CI goes red until you raise
 it. Both are one-line diffs, and only one of them changes what courier verifies.
+
+Re-measure both, and **re-measure the labels rather than only the floors.** The
+suppression packet added 31 database tests and nobody raised this file: the
+*floor* stayed green because it is a decrease detector, while the number printed
+beside it quietly stopped describing the tree for a whole packet. A floor that
+cannot catch it is not the same thing as a comment that cannot be stale, and only
+one of the two is a gate.
 
 **A test asserts about its own rows, never about the table's.** A count over the
 whole table — `Repo.aggregate(WebhookEndpoint, :count) == 0` — is a claim about
