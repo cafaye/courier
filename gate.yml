@@ -92,21 +92,32 @@ gate:
       # growing repository and this floor is a ratchet that is meant to be
       # raised as the suite grows, not a target the suite must hit.
       #
-      # Remeasured on the tree carrying `Courier.Inbound`: 1027 whole-suite tests,
-      # so 1021 with the same deliberate margin of 6 that 672 held against a
-      # measured 678, 722 against 728, 816 against 822, and 912 against 918.
-      # Neither incoming number described this tree — a floor is a claim about the
-      # tree it lives in, so it is measured on the tree it lives in.
+      # Remeasured on the MERGED tree carrying both `Courier.Inbound` and
+      # `Courier.Events`: 1073 whole-suite tests, so 1067 with the same deliberate
+      # margin of 6 that 672 held against a measured 678, 722 against 728, 816
+      # against 822, and 912 against 918.
       #
-      # 1027 measured with `./bin/prime` on this branch, and it is the sum of the
-      # two CI tiers measured the same way in the same run: 489 with no database
-      # and 538 with one. The +109 over the previous 918 is this packet's inbound
-      # tests, and **both tiers moved**, which is what distinguishes a floor
-      # measured on this tree from one copied forward. The `no database` tier grew
-      # because signature verification is arithmetic over bytes and parsing is JSON
-      # to a map — neither touches a repo, so the security-critical assertions
-      # about the SCHEME run with no database at all. The `database` tier grew
-      # because the security property is a claim about rows, and
+      # Neither incoming number described this tree, and that is the whole reason
+      # this re-measurement happened. The two packets were developed in parallel
+      # from a common parent and each raised the same three floors from its own
+      # branch: `Courier.Inbound` measured 1027 on a tree that did not have the
+      # event builders, `Courier.Events` measured 964 on a tree that did not have
+      # the inbound base. Taking either side would have left a floor that no tree
+      # had ever produced. A floor is a claim about the tree it lives in, so it is
+      # measured on the tree it lives in.
+      #
+      # 1073 measured with `./bin/prime`, and it is the sum of the two CI tiers
+      # measured the same way in the same run: 535 with no database and 538 with
+      # one. That the parts sum to the whole is the consistency check worth making:
+      # a mismatch would mean a test file belongs to neither tier, which would make
+      # both tier floors wrong rather than the total merely stale.
+      #
+      # The `no database` tier grew by 46 from `Courier.Events` — a file that
+      # builds envelopes, reads `cafaye.yml` and calls no `Repo` — and by 38 from
+      # `Courier.Inbound`, because signature verification is arithmetic over bytes
+      # and parsing is JSON to a map, neither of which touches a repo. The
+      # `database` tier grew by 25 and did not move for either packet's event
+      # work, because the security property there is a claim about rows, and
       # `test/courier/inbound_test.exs` is a `Courier.DataCase` for that reason
       # alone: "an unsigned payload records nothing" is unassertable against a
       # mock.
@@ -121,7 +132,7 @@ gate:
       # the same commit that added the 52 `Idempotency-Key` tests. Every one of
       # those is this rule: the floor moves in the same commit that changes what
       # courier verifies.
-      minimum: 1021
+      minimum: 1067
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres

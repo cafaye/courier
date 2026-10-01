@@ -199,10 +199,11 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 1021
+          bin/assert-suite "$log" "whole suite (bin/prime)" 1067
       #
-      # Remeasured on the tree carrying `Courier.Inbound`: whole suite 1027, which
-      # is 489 with no database and 538 with one. BOTH tiers moved, and they moved
+      # Remeasured on the MERGED tree carrying both `Courier.Inbound` and
+      # `Courier.Events`: whole suite 1073, which
+      # is 535 with no database and 538 with one. BOTH tiers moved, and they moved
       # for opposite reasons, which is what makes the pair worth recording rather
       # than just the total.
       #
@@ -224,7 +225,7 @@ jobs:
       # tier and made the security proof untestable, which is the tier split
       # catching a design error rather than a test count.
       #
-      # 1027 is also 489 + 538, which is the consistency check worth making: a
+      # 1073 is also 535 + 538, which is the consistency check worth making: a
       # whole suite that is not the sum of its own tiers is a suite where a file
       # has been left out of both.
       #
@@ -238,7 +239,7 @@ jobs:
       # quietly stopped describing the tree. Both were wrong and only one of them
       # would have failed a build.
 
-      - name: tier — no database (489 tests, 22 files)
+      - name: tier — no database (535 tests, 22 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -269,7 +270,7 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 489
+          bin/assert-suite "$log" "no database" 535
 
       - name: tier — database (538 tests, 25 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
@@ -370,8 +371,8 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 1027 passed | \`bin/assert-suite\` |"
-            echo "| no database, 22 files | 489 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 1073 passed | \`bin/assert-suite\` |"
+            echo "| no database, 22 files | 535 passed | tier step |"
             echo "| database, 25 files | 538 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
