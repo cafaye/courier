@@ -174,8 +174,9 @@ info:
     name: courier
     email: courier@cafaye.com
   license:
-    name: AGPL-3.0
-    identifier: AGPL-3.0-only
+    name: MIT
+    identifier: MIT
+    url: https://opensource.org/license/mit
 
 servers:
   - url: https://courier.cafaye.com
