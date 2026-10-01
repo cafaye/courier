@@ -14,6 +14,72 @@ document lands in both files in one commit, because core asserts the two agree.
 
 ### Added
 
+- **courier emits OpenTelemetry spans, into the collector that ships with kit's
+  stack.** `<SERVICE>_OTEL_ENDPOINT` is the only contract (core D16) and it is
+  **on by default** — unset, it is `http://otel-collector:4318` — so a developer
+  running `mix phx.server` and a deployer both get traces without assembling
+  anything, and a self-hoster already running a backend sets one variable and
+  kit's stack goes quiet. Bring-your-own is a supported deployment, not a
+  degraded mode.
+  - **One request span per request, named `courier.web.request`.** A child span
+    per email send, per webhook delivery and per outbox emission, named
+    `courier.email.send`, `courier.webhook.deliver` and `courier.outbox.emit`.
+    The span is recorded by `CourierWeb.Plugs.Telemetry`, which sits **above the
+    router and below the parsers**: inside the router a 404 and a 405 would have
+    no span at all, and below the parsers a body that cannot be read would have
+    none either — and that failure is exactly the one nobody wants invisible.
+  - **`http.route` is the route TEMPLATE, never the concrete path.** A template
+    has one value per endpoint; a concrete path has one per request, and kit's
+    collector derives metrics with a `spanmetrics` connector that mints a series
+    per distinct value. A 404 therefore carries **no** route: the path there is
+    caller-controlled text, so recording it is a cardinality bomb and a content
+    leak in one move.
+  - **Only 5xx is an error span.** A 401 and a 404 are courier refusing, which is
+    courier working; an error rate that counts them is a function of how much
+    guessing the platform absorbs, and an alert on that pages somebody to switch
+    off the protection doing its job.
+  - **Metrics come from the collector, not from courier**, and this was measured
+    rather than chosen: the Erlang SDK ships no metrics API at all
+    (`ls deps/opentelemetry/src | grep -c metric` is `0`). The connector runs
+    after redaction, so a derived metric cannot carry a dimension the allowlist
+    stripped. The cost is stated rather than hidden: courier cannot emit a gauge,
+    so a stalled outbox relay is invisible on the metrics signal.
+  - **Logs cost nothing and are not a per-language dependency.** compose
+    `logging:` sends the container's stdout/stderr to the collector's
+    `syslog/crash` receiver, which makes a crash a log record with a
+    `service.name` on it. The `syslog` driver rather than `filelog` because the
+    filelog form does not work at all under Docker Desktop or OrbStack.
+- **One span-attribute allowlist, and one recorder.**
+  `Courier.Observability.record/2` is the choke point every attribute in courier
+  passes through, projected from `core/schemas/telemetry/*.schema.json`.
+  `test/courier/telemetry_canary_test.exs` plants a canary in every field a
+  caller controls — path, query, headers, body — drives real requests through
+  the real router, and **raises** if it finds one in anything exported. It is a
+  test that fails when the boundary leaks, which is the only shape a redaction
+  proof can have.
+  - **Every absence assertion is paired with a presence one**, because a boundary
+    that deletes everything passes "no canary" and is useless. Three separate bugs
+    left this suite green with nothing exported at all while it was being written,
+    and `Courier.TestSpans.rendered!/0` now raises rather than returning an empty
+    string so that shape cannot recur quietly.
+- **Two dependencies, and the floor they are.** `{:opentelemetry, "~> 1.7"}` and
+  `{:opentelemetry_exporter, "~> 1.11"}`, in every environment including test —
+  without them courier cannot emit a span at all and the collector has nothing to
+  redact. Deliberately **not** added: `opentelemetry_metrics` (no such API in
+  this SDK), `opentelemetry_logger` (logs come from the container), and
+  `opentelemetry_phoenix` (it records `url.path`, `url.query` and headers as its
+  own attributes, and relying on the engine to strip them would make this one
+  control where the repository insists on two).
+- **`bin/gate-db`, and a `satisfy` command in `gate.yml` that names a file.**
+  Adopting kit's stack removed courier's own postgres container, and kit's
+  `fleet_check.py` fails a service that publishes its own port on one kit already
+  ships (`ports:` is a list and a second file's list is APPENDED, so an override
+  buys you both ports). So the host-side suite needs a postgres at
+  `localhost:5432` that courier no longer owns, `bin/gate-db` starts one, and the
+  declaration points at it. The old `docker compose up -d db` named a service this
+  repository no longer has, which is a gate declaration reporting a satisfied
+  operator while describing a repository that does not exist.
+
 - **`Idempotency-Key` is implemented on the two mutating `POST`s.** Core's
   `docs/openapi-conventions.md` §Idempotency has required it since courier-05, and
   courier-12 measured that courier accepted the header and ignored it: three
@@ -46,6 +112,22 @@ document lands in both files in one commit, because core asserts the two agree.
 
 ### Changed
 
+- **`docker-compose.yml` is an OVERRIDE on kit's stack, not a copy.** `kit.ref`
+  pins the kit commit, `bin/dev` is kit's own script verbatim, and this
+  repository's compose file owns three things: its database name and role, its
+  own service, and the crash layer. It carries no collector configuration — that
+  file holds the redaction allowlist, which kit derives from core's schemas, and a
+  service that owned it would be shipping a telemetry boundary nobody derived. No
+  `depends_on: otel-collector` either: nothing but the collector may be in a
+  readiness path, because a service that waits for the collector serves no traffic
+  while the collector is down, which is strictly worse than serving traffic with
+  no traces.
+- **`gate.yml`'s database requirement was rewritten** rather than left pointing at
+  a `db` service that no longer exists. See `bin/gate-db` above.
+- **The suite is 630 → 678, and the floors moved with it in the same commit** —
+  `gate.proof[].minimum` to 672, CI's `whole suite` to 678 and `no database` to
+  306. The `database` tier did not move, because not one of the 48 new tests
+  touches `Courier.Repo`, which is what that tier counts.
 - **`cafaye.yml` declares `core: ^0.2.0`, not `^0.1.0`.** The stale number was
   flagged in the manifest's own header as an unresolved guess — "assumes core's
   first release is 0.1.0; if it lands as 0.2.0 this line is wrong". It landed as
@@ -162,6 +244,24 @@ document lands in both files in one commit, because core asserts the two agree.
   `update/3`**, with the account as the first argument. `enabled?/3` is unchanged
   and takes no account — see above.
 
+### Known gaps
+
+- **courier cannot emit a metric gauge**, so a stalled outbox relay is invisible
+  on the metrics signal and shows up only as a flat trace count. The alternative
+  would be a service-side meter, and the SDK has no metrics API to build one with.
+- **A 500 span carries no route.** The exception is raised past the router, so
+  there is no matched route to record, and a concrete path is not an acceptable
+  substitute. The status, the method and the error type are there; the path is not.
+- **The Erlang SDK drops the span processor it starts for itself.**
+  `otel_tracer_server:init_processor/3` calls `supervisor:start_child(otel_span_sup,
+  [Module, Config])` against a `one_for_one` supervisor, which answers
+  `{:error, {:invalid_child_spec, …}}`, and the result is discarded with `_ =`.
+  Verified against `Supervisor.which_children(:otel_span_sup)` in opentelemetry
+  1.7.0 and 1.5.1: the sweeper and the ETS table are there and a processor never
+  is. `Courier.SpanCollector` installs the processor itself and raises at boot if
+  the SDK's record shape changes, so the workaround fails loudly rather than
+  silently exporting nothing.
+
 ### Tests
 
 Fourteen more, all written before the code they cover:
@@ -184,6 +284,32 @@ Fourteen more, all written before the code they cover:
   comment explaining why the gap was deliberate; it now asserts that both verbs
   are, which is the same claim about the same pipeline.
 
+Forty-eight more, and the first three files in courier are about a boundary rather
+than a behaviour:
+
+- **`telemetry_canary_test.exs` — nine tests, and the reason this packet
+  exists.** A canary string is planted in a path, a query string, a bearer token,
+  a cookie, an API key, a user-agent, a malformed `traceparent`, a webhook URL, a
+  signing secret and a request body, and then real requests are driven through
+  the real router; any appearance of that string in an exportable span attribute
+  raises `THE REDACTION BOUNDARY LEAKED` and prints the whole export. Each of the
+  three failure modes it distinguishes has a test of its own: a 404 carries **no**
+  route, a 404 is **not** an error span, and a parameterised route exports its
+  **template**.
+- **`observability_test.exs` — eighteen, on the allowlist itself.** The names are
+  names somebody already thought of; no name contains a word that names content
+  (`payload`, `params`, `body`, `header`, `token`, `secret`, `email`, `tenant`,
+  …); and a value that is not on the list is dropped rather than recorded. The
+  two files are not the same claim — a canary test is satisfied by a service that
+  exports nothing, and an allowlist test by a service that never calls `record/2`.
+- **`telemetry_test.exs` — twenty-one, on the contract and the wiring.** The
+  endpoint variable and its default are the same value in code and in compose; the
+  resource carries `service.name`, `service.version`, `deployment.environment` and
+  a `tenant_id` that is absent rather than empty by default; a span survives the
+  real SDK and arrives at a real exporter; and telemetry that cannot be installed
+  reports *why* instead of silently doing nothing. One of these found a real bug:
+  `enabled?/0` was inverted, so telemetry was off by default in every
+  environment except the test suite that proved it worked.
 
 courier can send a transactional mail, honour what the user asked not to receive,
 record every send as an event that its own relay publishes, and deliver those

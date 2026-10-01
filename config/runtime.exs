@@ -23,6 +23,37 @@ end
 config :courier, CourierWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+# ---------------------------------------------------------------------------
+# OPENTELEMETRY. In every environment, and that is the point.
+#
+# A developer running `mix phx.server` exports into the collector that ships with
+# the stack, and a deployer gets traces without assembling anything. Gating this
+# to :prod would make the default a no-op everywhere it is actually used, which is
+# backwards.
+#
+# The RULES are in `Courier.Telemetry` and this is four lines that call into it —
+# not a second copy of them. The Erlang SDK is configured through the application
+# environment and started by the application controller, which runs before
+# `Courier.Application.start/2`, so there is no code path that could set this
+# earlier; keeping the logic in a module is what makes it testable at all.
+#
+# `<SERVICE>_OTEL_ENDPOINT` is the only contract (core D16). Unset, it is the
+# collector that ships with the stack. Set it to anything speaking OTLP and
+# courier goes there instead — bring-your-own is a supported deployment, not a
+# degraded mode.
+#
+# NOT IN TEST, and the guard is load-bearing rather than fussy. `runtime.exs` runs
+# AFTER every environment's config file, including `test.exs` — so an unguarded
+# line here would replace the suite's in-memory exporter with a real OTLP one.
+# Every redaction test in this repository asserts the ABSENCE of a canary from the
+# exported spans, and a real exporter in a suite with no collector exports
+# nothing: all of them would go green, in about a second, having proved nothing.
+# A guard whose absence produces a green suite is the worst kind of guard to
+# leave to a reader.
+if config_env() != :test do
+  config :opentelemetry, Courier.Telemetry.sdk_config()
+end
+
 # The From address of every transactional email is deployment configuration:
 # an operator sets MAIL_FROM / MAIL_FROM_NAME and redeploys, nobody commits a
 # changed address. Subjects stay in config/config.exs — they are product copy,

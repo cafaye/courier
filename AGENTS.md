@@ -31,6 +31,12 @@ lib/courier/notification_preference.ex         the row behind a user's answer
 lib/courier/notification_preferences.ex       read and write those answers
 lib/courier/nats_publisher.ex         the behaviour the relay publishes through
 lib/courier/nats_publisher/noop.ex    the stand-in that hands envelopes back
+lib/courier/observability.ex          the span-attribute ALLOWLIST, and the one
+                                      record/2 every span in courier goes through
+lib/courier/span_collector.ex         the on-end processor, installed by hand
+                                      because the SDK's own is silently dropped
+lib/courier/telemetry.ex              the contract, the resource, and the SDK
+                                      wiring the application controller reads
 lib/courier/principal.ex              the caller, the resolver behaviour, and the
                                       default resolver that authenticates nobody
 lib/courier/secret_box.ex             sealing: a signing secret at rest, AES-GCM
@@ -56,6 +62,8 @@ lib/courier_web/plugs/parse_body.ex   Plug.Parsers, with courier's 400
 lib/courier_web/plugs/principal.ex    who is calling; 401 when nobody is
 lib/courier_web/plugs/idempotency.ex  Idempotency-Key on a mutating POST, and its 409s
 lib/courier_web/plugs/problem_content_type.ex  a non-2xx is problem+json
+lib/courier_web/plugs/telemetry.ex     the request span: above the router, below
+                                      the parsers, and route template not path
 lib/courier_web/controllers/health_controller.ex   GET /healthz, GET /readyz
 lib/courier_web/controllers/notification_preferences_controller.ex  GET/PUT /v1
 lib/courier_web/controllers/webhook_endpoints_controller.ex  the six /v1 actions
@@ -69,6 +77,10 @@ test/courier/deliver_adapter_test.exs what happens when the provider says no
 test/courier/notification_preferences_test.exs  defaults, writes, rejections
 test/courier/events_test.exs          the envelope against core's schema
 test/courier/nats_publisher_test.exs  the behaviour and the stand-in
+test/courier/observability_test.exs   the allowlist, asserted on directly
+test/courier/telemetry_test.exs       the contract, the resource, the wiring
+test/courier/telemetry_canary_test.exs  THE PROOF: a canary in every field a
+                                           caller controls, in nothing exported
 test/courier/secret_box_test.exs      a secret is not readable from its column
 test/courier/idempotency_test.exs     the claim, the refusals, the retention, the expiry
 test/courier/webhook_endpoints_test.exs        the rows and their promises
@@ -93,14 +105,21 @@ test/support/openapi_paths.ex        the reader and the comparison the two above
 test/support/recording_sender.ex      a sender that records instead of sending
 test/support/header_resolver.ex       a principal that reads a header
 test/support/test_dns.ex              a resolver that answers from a table
+test/support/test_span_exporter.ex    the exporter that records instead of sending
+test/support/test_spans.ex            reading those spans, and RAISING on empty
 gate.yml                              the gate, DECLARED: command, proof, what it needs
+kit.ref                               the pinned kit commit the stack comes from
 bin/prime                             the gate: deps, database, tests
 bin/assert-suite                      refuses a run that skipped or excluded tests
 bin/gate-self-test                    proves gate.yml is able to fail
+bin/gate-db                           the postgres the gate needs, when the machine
+                                      has none at the address config/test.exs names
 bin/toolchain-pins                    reads mise.toml, checks CI has not drifted
+bin/dev                               kit's, verbatim: fetch kit.ref, merge, up
 .github/workflows/ci.yml              calls kit's workflow, plus gate and release
 Dockerfile                            two-stage release build, slim final stage
-docker-compose.yml                    postgres:17-alpine plus the release image
+docker-compose.yml                    an OVERRIDE on kit's stack: the courier
+                                      service, its database, and the crash layer
 rel/overlays/bin/server               the release entrypoint the image runs
 rel/overlays/bin/migrate              the release's migration entrypoint
 ```
@@ -130,6 +149,21 @@ floor for library consumers; do not pin an exact version there.
 dependency list. Swoosh, Oban, Broadway, and the HTTP clients for the webhook
 pipeline are Phase 3 packets — not this one, not "just to prepare".
 
+One packet has been approved since, and the two names it added are
+`{:opentelemetry, "~> 1.7"}` and `{:opentelemetry_exporter, "~> 1.11"}`: the
+trace SDK and the OTLP exporter, in **every** environment including test, because
+without them courier cannot emit a span at all and kit's collector has nothing to
+redact. They are the floor, not a choice among alternatives — the alternative was
+courier exporting nothing and the whole redaction boundary being untested. What
+was **not** added is as load-bearing: no `opentelemetry_metrics` (the Erlang SDK
+has no metrics API — measured, `ls deps/opentelemetry/src | grep -c metric` is
+`0`), no `opentelemetry_logger` (logs come from the collector's `syslog/crash`
+receiver via compose `logging:`, which is a property of the container rather than
+a per-language SDK), and no `opentelemetry_phoenix` (it would record
+`url.path`, `url.query` and headers as its own attributes, and depending on the
+engine to strip them would make courier's boundary one control where this
+repository insists on two).
+
 **`mix precommit` before you commit.** It compiles with warnings-as-errors,
 drops unused deps from the lockfile, formats, and runs the suite. `bin/prime`
 is the gate for a clean checkout; `mix precommit` is what a change must pass.
@@ -157,9 +191,9 @@ two can disagree, one of them is lying. The workflow adds a database, the tier
 counts and the lockfile guard *around* that command; it does not reimplement it.
 
 **A tier that CI cannot name is a tier nobody ran.** The suite partitions
-exactly, by the case template: 258 tests in the 12 files that never touch
-`Courier.Repo`, 358 in the 19 that do, and `mix test` is aliased to
-`ecto.create` first, so a runner with no database executes *zero* of the 616 —
+exactly, by the case template: 306 tests in the 15 files that never touch
+`Courier.Repo`, 372 in the 19 that do, and `mix test` is aliased to
+`ecto.create` first, so a runner with no database executes *zero* of the 678 —
 SSRF table included. Both counts are asserted in CI by `bin/assert-suite`, and
 the SSRF table gets its own 62-test run so the log carries a line that can only
 exist if that harness ran. **When you add or delete a test, raise the floor in
@@ -311,6 +345,53 @@ account comes from `conn.assigns.current_account`, never from a request body —
 `CourierWeb.Plugs.Principal` is a seam with a refusing default, so a courier
 without identity's JWT verifier is locked rather than open.
 
+**One span-attribute allowlist, in `Courier.Observability`, and it is a
+choke point rather than a convention.** Every attribute courier records goes
+through `Courier.Observability.record/2`, which drops anything not on the list;
+the list is projected from `core/schemas/telemetry/*.schema.json`. That is the
+whole defence, and its realistic failure is not an attacker — it is a
+well-meaning engineer in six months adding `record(span, %{"courier.payload" =>
+params})` because it would help debug a delivery, in the one service in the
+fleet whose payloads are other customers' data. So:
+
+  * **Do not call `span.set_attribute/3` directly.** There is one recorder and
+    it filters. A `set_attribute` on a span courier owns bypasses the allowlist
+    by exactly as much as the engine will later strip — which is to say it
+    succeeds.
+  * **`http.route` is the route TEMPLATE**, from `Phoenix.Router.route_info/4`,
+    never `conn.request_path`. A template has one value per endpoint; a concrete
+    path has one per request, and kit's collector derives metrics with a
+    `spanmetrics` connector that mints a series per distinct value. A 404
+    therefore carries **no** route at all: the path there is caller-controlled
+    text, which is both the cardinality bomb and the content leak in one move.
+  * **4xx is not an error span.** Only 5xx is. A 401 or a 404 is courier
+    refusing, which is courier working; an error rate that counts it is a
+    function of how much guessing the platform absorbs, and an alert on it pages
+    somebody to switch off the protection doing its job.
+  * **No `tenant_id` on a span.** It is a resource attribute, and
+    `test/courier/telemetry_test.exs` holds the resource's own shape.
+
+`test/courier/telemetry_canary_test.exs` is the proof and it is not optional: it
+plants a canary in every field a caller controls — path, query, headers, body —
+drives real requests through the real router, and raises
+`THE REDACTION BOUNDARY LEAKED` if it finds one in anything exported. **Every
+absence assertion in that file is paired with a presence one**, because a
+redaction boundary that deletes everything passes "no canary" and is useless:
+three separate bugs left this suite green with nothing exported at all (an
+exporter implementing `export/3` where the callback is `export/4`; an `init/1`
+returning `:ok` where `{:ok, state}` was required; a `record/2` guarded on
+`is_map(span)` when a span is a record). `Courier.TestSpans.rendered!/0` raises
+rather than returning an empty string so that shape cannot recur silently.
+
+**Metrics come from the collector's `spanmetrics` connector, not from courier.**
+`ls deps/opentelemetry/src | grep -c metric` is `0` — the Erlang SDK ships no
+metrics API at all — so there is no second implementation to be inconsistent
+with kit's, and no risk of two series with the same name and different
+definitions. It also runs *after* redaction, which means a derived metric can
+never carry a dimension the allowlist stripped. The cost is honest and worth
+stating: courier cannot emit a gauge, so **a stalled outbox relay is invisible
+on the metrics signal** and shows up only as a flat trace count.
+
 ## Environment
 
 `DATABASE_URL`, `SECRET_KEY_BASE` and `PHX_HOST`, as any Phoenix release needs,
@@ -323,6 +404,22 @@ plus one this packet added:
   under. `config/test.exs` sets a fixed one; losing the production key means
   every stored secret has to be re-issued, because the plaintext cannot be
   recovered from the ciphertext.
+
+And one this packet added for observability, which is optional everywhere:
+
+- **`COURIER_OTEL_ENDPOINT`** — the OTLP endpoint, defaulted to
+  `http://otel-collector:4318`, which is the collector that ships with kit's
+  stack (core D16: this variable is the only contract, and the collector is
+  just its default value). Point it at anything speaking OTLP and courier goes
+  there instead; unset it and courier exports into a collector that is not
+  running, which costs spans and nothing else — there is no queue, no retry loop
+  and no dial at boot. `COURIER_TENANT_ID` and `DEPLOYMENT_ENVIRONMENT` are
+  resource attributes, not measurements, and both are unset by default.
+  `config/runtime.exs` guards the whole block with `config_env() != :test`: that
+  guard is load-bearing, because `runtime.exs` runs *after* `test.exs` and an
+  unguarded line would replace the suite's in-memory exporter with a real one —
+  and every redaction test asserts the **absence** of a canary, so with nothing
+  exporting they would all go green having proved nothing.
 
 ## Toolchain
 

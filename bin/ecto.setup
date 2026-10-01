@@ -1,0 +1,11 @@
+#!/bin/sh
+# kit's `bin/dev` probes for `bin/migrate`, then `bin/rails`, then
+# `bin/ecto.setup`. This is the last of those, and it exists so `bin/dev` has
+# something to call on a machine where nothing else is set up.
+#
+# It is a thin wrapper rather than a reimplementation: `mix ecto.create` and
+# `mix ecto.migrate` are the supported entry points and a second path to the
+# schema is a second thing to keep in step.
+set -eu
+mix ecto.create
+mix ecto.migrate

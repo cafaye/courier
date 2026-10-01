@@ -7,8 +7,16 @@ defmodule Courier.Application do
 
   @impl true
   def start(_type, _args) do
+    # One line, and only ever on the DISABLED path. It is here rather than in
+    # `config/runtime.exs` because configuration cannot log into the store an
+    # operator reads. See Courier.Telemetry for the contract this reports on.
+    Courier.Telemetry.log_startup()
+
     children = [
-      CourierWeb.Telemetry,
+      # The request-span instrumentation. A child rather than an endpoint plug
+      # because it owns a `:telemetry` handler for the exception path, and a
+      # handler attached from a plug's `init/1` is re-attached on every reload.
+      Courier.Telemetry,
       Courier.Repo,
       {DNSCluster, query: Application.get_env(:courier, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Courier.PubSub},

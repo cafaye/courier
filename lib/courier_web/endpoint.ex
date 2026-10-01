@@ -54,6 +54,24 @@ defmodule CourierWeb.Endpoint do
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options
+
+  # The request span, and the placement is the whole design. It goes here —
+  # ABOVE the router, below the parsers — because of the two halves of what it
+  # records:
+  #
+  #   * `handle_result/3` runs after the REST of the pipeline, so the matched
+  #     route is knowable. Inside the router it would be, but a plug inside the
+  #     router never runs for a 404 or a 405.
+  #   * `call/2` runs before the parsers read the body, so a request that cannot
+  #     be parsed is still traced. `Plug.Parsers` raises on a body it cannot
+  #     read, and that raise is rendered by `CourierWeb.ErrorJSON` from the
+  #     assigns `CourierWeb.Plugs.Trace` left — a request whose span is missing is
+  #     a request whose failure is invisible.
+  #
+  # It is a STRUCT plug, which is the only kind with an after-hook; see
+  # CourierWeb.Plugs.Telemetry for the measurement behind that choice.
+  plug CourierWeb.Plugs.Telemetry
+
   plug CourierWeb.Plugs.ProblemContentType
   plug CourierWeb.Router
 end
