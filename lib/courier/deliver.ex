@@ -18,6 +18,20 @@ defmodule Courier.Deliver do
        a mail courier cannot build has now sent something to a person.
     4. **The user wants it.** `:suppressed` — no mail, no event, no record of a
        send that did not happen.
+    5. **The mailbox can receive it.** `{:error, {:suppressed_address, state}}` —
+       a hard bounce (RFC 5321 §5.1.1, `:undeliverable`) or a spam complaint
+       (RFC 2142 §5, `:suppressed`) recorded by a provider. Also before the
+       provider is asked, and also no mail, no event, no record.
+    6. **The message has something in it.** `{:error, :empty_message}` — a
+       rendered message with neither a text nor an HTML body. `Swoosh` would
+       accept it and answer a provider-shaped id, so this is the last check before
+       the transaction rather than an afterthought inside it.
+
+  Steps 4 and 5 are two different questions and the order is deliberate: "does
+  this person want this mail?" is asked before "can this mailbox still receive
+  it?", because the user's own answer is the one they can act on. Both stop the
+  send — mailing a dead address costs a sending domain its reputation, and mailing
+  somebody who marked you as spam costs more.
 
   What is left is one transaction: the provider is called and the outbox row is
   written. If the provider refuses, the transaction rolls back and there is
@@ -34,6 +48,7 @@ defmodule Courier.Deliver do
   alias Courier.NotificationPreferences
   alias Courier.OutboxEvent
   alias Courier.Repo
+  alias Courier.Suppressions
 
   @doc """
   Sends the `welcome` mail — the payload of the platform's user-created event.
@@ -64,7 +79,9 @@ defmodule Courier.Deliver do
     with {:ok, type} <- fetch_type(type),
          {:ok, user_id} <- fetch_user_id(payload),
          {:ok, email} <- Mailers.build(type, payload),
-         :ok <- fetch_preference(user_id, type) do
+         :ok <- fetch_preference(user_id, type),
+         :ok <- fetch_address(email),
+         :ok <- fetch_body(email) do
       send_and_record(type, user_id, email)
     end
   end
@@ -90,6 +107,40 @@ defmodule Courier.Deliver do
     else
       {:error, :suppressed}
     end
+  end
+
+  # **After** the preference and not before, which is the order
+  # `Courier.Suppressions`'s own moduledoc states: "does this person want this
+  # mail?" is asked before "can this mailbox still receive it?". Both stop the
+  # send; the order decides which refusal a caller is told about, and the user's
+  # own answer is the one they can act on — changing an address they no longer
+  # want mail at would be a strange remedy to offer.
+  #
+  # It is here rather than in an HTTP controller because a hard-bounced mailbox
+  # does not get mail *whatever the caller asked for*, and every caller of this
+  # module is a caller of that promise. `Courier.Suppressions` answers
+  # `suppressed?/1` and `state/1`; the state is read rather than the boolean
+  # because the two mean different things to whoever reads the refusal — a pile of
+  # `:undeliverable` is list hygiene, a pile of `:suppressed` is a content and
+  # sender-reputation problem — and a boolean would have thrown that away.
+  #
+  # `state/1` costs one `EXISTS` per state it tests, up to two, on the path every
+  # send takes. That is a deliberate trade for a reason that is not performance: the
+  # fold is documented as the precedence, and calling it is how a caller cannot
+  # reimplement the precedence wrongly.
+  defp fetch_address(email) do
+    case Suppressions.state(recipient(email)) do
+      nil -> :ok
+      state -> {:error, {:suppressed_address, state}}
+    end
+  end
+
+  # The last thing checked before the provider, and the cheapest thing to get
+  # wrong: `Swoosh` delivers a bodiless email and answers a provider-shaped id, so
+  # without this a message with nothing in it would be recorded as delivered and
+  # published as `courier.email.delivered`. See `Courier.Mailers.body?/1`.
+  defp fetch_body(email) do
+    if Mailers.body?(email), do: :ok, else: {:error, :empty_message}
   end
 
   # The provider call is inside the transaction on purpose. The send is the state

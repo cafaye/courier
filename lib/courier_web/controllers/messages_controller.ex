@@ -1,0 +1,343 @@
+defmodule CourierWeb.MessagesController do
+  @moduledoc """
+  `POST /v1/messages` — courier's HTTP door into `Courier.Deliver`.
+
+  ## The contract, in one sentence
+
+  **A 200 means the provider accepted the message for delivery and courier wrote
+  the `courier.email.delivered` row in the same transaction. It does not mean the
+  mail arrived**, because a submission protocol says nothing about arrival and
+  courier does not have a delivery receipt to report one with. `data.status` reads
+  `accepted` for the same reason and never `delivered`.
+
+  ## Synchronous, and why
+
+  The whole send happens inside the request: the preference is read, the
+  suppression list is consulted, the provider is dialled, and the outbox row is
+  written before the response is built. A caller learns the real outcome — sent,
+  declined, suppressed, or the provider said no — rather than a receipt for an
+  intention.
+
+  The alternative was genuinely considered and is queued in
+  `Courier.Workers`: a 202 would answer before the suppression check ran, and a
+  refusal that arrives after the response is a refusal the caller cannot act on.
+  "A caller that cannot tell suppressed from sent will retry forever" is not a
+  cost a queued contract can pay cheaply. So the send is synchronous, and the
+  availability price of that is stated rather than assumed: courier holds a
+  database transaction open across the provider's dial, and a provider that is
+  slow makes this request slow. What makes it survivable is that the failure is
+  honest — a 503 with a code the caller retries — and that the retry is free under
+  an `Idempotency-Key`.
+
+  ## The status a caller can act on
+
+  Three refusals, distinguishable by status and `code` alone, because a client
+  branches on those and not on `detail`:
+
+  | outcome | status | `code` | retry? |
+  | --- | --- | --- | --- |
+  | accepted for delivery | 200 | — | — |
+  | the recipient's mailbox is suppressed | 409 | `conflict` | **no** |
+  | the request is wrong, or the user declined this type | 422 | `validation_failed` | after fixing it |
+  | the provider refused, or courier cannot deliver | 503 | `unavailable` | yes, same key |
+
+  **The suppression refusal is a 409 and not a 422**, and the argument is that it
+  is not a property of the request. A hard bounce and a spam complaint are facts
+  about a *mailbox*, recorded by a provider and not chosen by this caller, and the
+  table behind them is never exposed through any route — so this response is the
+  only place the fact can surface. 409 `conflict` is core's own code for a request
+  that collides with the current state of a resource, and it is the status that
+  tells a generated client not to try again. A 422 would tell the caller to change
+  a request that cannot be changed.
+
+  **A declined preference is a 422**, which is the opposite answer on purpose. The
+  user declining is visible to the caller through
+  `GET /v1/notification_preferences/{user_id}`, it is changeable through the `PUT`
+  beside it, and `errors[]` — which core reserves for 422 and for nothing else —
+  can name `type` as the field that is the problem. A machine reading `code` can
+  therefore tell the two refusals apart without parsing prose, and a caller that
+  retries neither is the point.
+
+  The suppression response deliberately **does not echo the address** and does not
+  distinguish the two states in anything but `detail`. `email_suppressions` has no
+  `account_id` by design, so a 409 is a fact about a mailbox rather than about
+  another tenant's data; quoting the address would make a probe of guessed
+  addresses worth running, and a status nobody can read the table for is the same
+  posture the suppression packet took when it declined to expose one.
+
+  ## The pre-flight, which is the same gate the boot checks
+
+  `Courier.MailerAdapter` refuses to boot a courier whose adapter cannot deliver,
+  and `Courier.Application` checks the *effective* adapter a second time. This
+  action asks the same question a third time, per request, and it exists for a
+  reason neither of the other two covers: **the refusal has to be visible to the
+  caller.** A courier that booted with a silent adapter and is asked to send would
+  otherwise answer 200, write an outbox row and publish `courier.email.delivered`
+  for mail nobody receives — the whole failure the adapter work exists to end, one
+  layer further out. 503 `unavailable` is the honest answer, and it costs one
+  `Application.get_env/2` read.
+
+  It is scoped to production exactly as `verify_boot!/1` is, because `Test` and
+  `Local` are the correct adapters in the environments that configure them.
+
+  ## Why the account is not read from the body
+
+  `conn.assigns.current_account`, from `CourierWeb.Plugs.Principal`, and nowhere
+  else — and `CourierWeb.Messages` refuses an `account_id` in a body as the
+  unknown field it is. The tenancy of a *send* is the caller's; the tenancy of the
+  recipient's mailbox is not a question courier asks, because the suppression table
+  has none to ask with.
+
+  ## Authorization
+
+  One question, and it is answered before the action: is there a principal. The
+  default resolver authenticates nobody, so a courier deployed without identity's
+  JWT verifier locks this route rather than serving it —
+  `test/courier_web/controllers/messages_controller_test.exs` proves the 401, and
+  a send endpoint without it would be the platform's open mail relay.
+  """
+
+  use CourierWeb, :controller
+
+  require Logger
+
+  alias Courier.Deliver
+  alias Courier.MailerAdapter
+  alias CourierWeb.Messages
+  alias CourierWeb.Problem
+
+  @doc """
+  Sends one message, or says exactly why it was not sent.
+  """
+  def create(conn, params) do
+    with :ok <- deliverable(),
+         {:ok, payload} <- Messages.validate(params),
+         {:ok, result} <- Deliver.email(params["type"], payload) do
+      json(conn, accepted(result, payload))
+    else
+      {:error, :adapter_cannot_deliver} ->
+        adapter_cannot_deliver(conn)
+
+      {:error, fields} when is_list(fields) ->
+        validation_failed(conn, fields)
+
+      {:error, {:invalid_payload, changeset}} ->
+        invalid_payload(conn, changeset)
+
+      {:error, :unknown_notification_type} ->
+        unknown_type(conn)
+
+      {:error, :missing_user_id} ->
+        missing_user_id(conn)
+
+      {:error, :suppressed} ->
+        declined(conn)
+
+      {:error, {:suppressed_address, state}} ->
+        suppressed(conn, state)
+
+      {:error, {:delivery_failed, reason}} ->
+        provider_refused(conn, reason)
+
+      {:error, {:event_not_recorded, detail}} ->
+        not_recorded(conn, detail)
+
+      {:error, :empty_message} ->
+        empty_message(conn)
+
+      {:error, reason} when reason in [:from_not_configured, :subject_misconfigured] ->
+        misconfigured(conn, reason)
+    end
+  end
+
+  # `type` is the one piece of the request the context takes as an argument rather
+  # than as payload, and it is read from `params` here rather than from the
+  # validated payload because it is not payload. By the time this runs
+  # `CourierWeb.Messages.validate/1` has established that it is a non-blank string,
+  # and `Courier.Deliver.email/2` takes either spelling and rejects a type courier
+  # does not send, so there is no atom conversion and no guessing.
+  defp accepted(result, payload) do
+    %{
+      data: %{
+        message_id: result.message_id,
+        event_id: result.event_id,
+        notification_type: result.notification_type,
+        user_id: payload.user_id,
+        status: "accepted"
+      }
+    }
+  end
+
+  # --- the refusals ---------------------------------------------------------
+
+  defp deliverable do
+    if adapter_deliverable?(), do: :ok, else: {:error, :adapter_cannot_deliver}
+  end
+
+  defp adapter_deliverable? do
+    # `config_env/0` rather than `Mix.env/0`, for the reason
+    # `Courier.MailerAdapter.config_env/0` gives: it is not set inside a RELEASE,
+    # and a release reading it would treat itself as development and hand out
+    # deliveries it cannot make.
+    MailerAdapter.config_env() != :prod or MailerAdapter.deliverable?(effective_adapter())
+  end
+
+  defp effective_adapter do
+    :courier
+    |> Application.get_env(Courier.Mailer, [])
+    |> Keyword.get(:adapter)
+  end
+
+  defp adapter_cannot_deliver(conn) do
+    Logger.error(
+      "message send refused: courier cannot deliver through " <>
+        MailerAdapter.describe(adapter: effective_adapter())
+    )
+
+    Problem.send(
+      conn,
+      503,
+      :unavailable,
+      "courier cannot deliver mail: the configured adapter never reaches a provider. " <>
+        "See COURIER_MAIL_ADAPTER."
+    )
+  end
+
+  defp validation_failed(conn, fields) do
+    Problem.send(conn, 422, :validation_failed, "The message was not valid.", fields)
+  end
+
+  # The changeset's own errors rather than a rewritten list, so the per-type
+  # required fields live in exactly one place (`Courier.Mailers`).
+  defp invalid_payload(conn, changeset) do
+    Problem.send(
+      conn,
+      422,
+      :validation_failed,
+      "The message was not valid: " <>
+        Enum.map_join(changeset.errors, ", ", fn {field, {message, _opts}} ->
+          "#{field} #{message}"
+        end),
+      Enum.map(changeset.errors, fn {field, {_message, opts}} ->
+        %{
+          "field" => to_string(field),
+          "code" => Keyword.get(opts, :code, "invalid_format")
+        }
+      end)
+    )
+  end
+
+  defp unknown_type(conn) do
+    Problem.send(
+      conn,
+      422,
+      :validation_failed,
+      "That is not a notification type courier sends.",
+      [%{"field" => "type", "code" => "unknown_notification_type"}]
+    )
+  end
+
+  defp missing_user_id(conn) do
+    Problem.send(conn, 422, :validation_failed, "The message names no user.", [
+      %{"field" => "user_id", "code" => "required"}
+    ])
+  end
+
+  # A 422 and not a 409, and the reason is in the moduledoc: this refusal is
+  # visible and changeable through the preferences API, so it is the request that
+  # is wrong rather than a collision the caller cannot resolve.
+  #
+  # `errors[]` is core's for 422 only, which is what makes `type` nameable here
+  # and what keeps the two refusals distinguishable without parsing `detail`.
+  defp declined(conn) do
+    Problem.send(
+      conn,
+      422,
+      :validation_failed,
+      "The recipient has asked not to receive this notification by email. " <>
+        "Read or change it through GET or PUT /v1/notification_preferences/{user_id}.",
+      [%{"field" => "type", "code" => "notification_preferences_disabled"}]
+    )
+  end
+
+  # The two states, in words, because an operator's response to each is different:
+  # a pile of `undeliverable` is list hygiene, a pile of `complained` is a content
+  # and sender-reputation problem. No state code in the envelope, because
+  # `Courier.Suppressions` is not exposed through any route and this response must
+  # not become the one place a caller can enumerate it.
+  defp suppressed(conn, :undeliverable) do
+    Problem.send(
+      conn,
+      409,
+      :conflict,
+      "That mailbox does not exist: it hard-bounced a previous message, and courier " <>
+        "does not write to a mailbox that has said it is gone."
+    )
+  end
+
+  defp suppressed(conn, :suppressed) do
+    Problem.send(
+      conn,
+      409,
+      :conflict,
+      "That recipient reported a previous message as spam. courier does not write " <>
+        "to someone who has asked not to be written to."
+    )
+  end
+
+  # 503 and not 500: courier is fine and its dependency is not, which is the whole
+  # difference between a caller retrying and a caller filing a bug. The reason is
+  # logged rather than returned, because a provider's error string is its own and
+  # this repository is public.
+  defp provider_refused(conn, reason) do
+    Logger.error("message send failed at the provider: #{inspect(reason)}")
+
+    Problem.send(
+      conn,
+      503,
+      :unavailable,
+      "The mail provider did not accept the message. Nothing was sent and nothing " <>
+        "was recorded, so this request is safe to retry with the same Idempotency-Key."
+    )
+  end
+
+  defp not_recorded(conn, detail) do
+    Logger.error("message sent but its event was not recorded: #{inspect(detail)}")
+
+    Problem.send(
+      conn,
+      500,
+      :internal,
+      "The message was accepted but courier could not record it. The send was " <>
+        "rolled back, so nothing is delivered and nothing is claimed."
+    )
+  end
+
+  # 500 and not 422, on purpose: the caller's request was fine and courier's own
+  # template rendered nothing, so telling the caller to change their body would be
+  # sending them to fix something they did not break. It is still a 500 rather than
+  # a 2xx because the alternative is the silent default this repository refuses —
+  # a bodiless mail reported as accepted.
+  defp empty_message(conn) do
+    Logger.error("message rendered with no body in either format; refusing to send it")
+
+    Problem.send(
+      conn,
+      500,
+      :internal,
+      "courier rendered this message with no body, and refused to send it. This is " <>
+        "courier's own defect rather than the request's."
+    )
+  end
+
+  defp misconfigured(conn, reason) do
+    Logger.error("courier is misconfigured for this send: #{inspect(reason)}")
+
+    Problem.send(
+      conn,
+      500,
+      :internal,
+      "courier is not configured to send this notification."
+    )
+  end
+end

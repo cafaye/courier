@@ -322,19 +322,34 @@ defmodule CourierWeb.OpenAPIErrorResponsesTest do
     # sentences are wrapped: matching a whole sentence would fail the first time
     # somebody reflows a comment, which teaches nobody anything. The reason is
     # here so the token is not a mystery.
-    # **409 left this list in courier-14**, and its departure is the reason the
-    # list is a list rather than a constant. It was here on the measured reason
-    # that a duplicate `url` is a 422 whose `errors[0].code` is `taken` — which is
-    # still true, and is still what the document's header says about *that*. What
-    # changed is that courier began returning a 409 for a different reason
-    # entirely: `Idempotency-Key`. So the status stopped being unreachable and
-    # became declared on the two operations that accept the header, and the check
-    # that would have caught it going the other way is the provoke below.
+    #
+    # **This map is a list and not a constant, and two statuses have left it.** Each
+    # departure is the same shape, and it is the shape this file exists to catch:
+    # a status courier could not return became one it does, and the document had
+    # to start declaring it. In both cases the fix was to implement the status and
+    # then say so here — never to delete the line and let the document quietly stop
+    # describing something a client can receive.
+    #
+    #   * **409 left in courier-14.** It was here on the measured reason that a
+    #     duplicate `url` is a 422 whose `errors[0].code` is `taken` — still true,
+    #     and still what the header says about *that*. What changed is that courier
+    #     began returning a 409 for a different reason entirely: `Idempotency-Key`.
+    #     The status stopped being unreachable and became declared on the
+    #     operations that accept the header.
+    #   * **503 left in courier-21**, with `POST /v1/messages`. It was here on the
+    #     measured reason that only `GET /readyz` sends it, and that is still true
+    #     — but a send has a dependency courier does not control, and a send has to
+    #     be able to say so. A provider that refuses is a 503 `unavailable` and not
+    #     a 500, because courier is fine and its dependency is not; and the
+    #     same-predicate re-check makes "courier cannot deliver through this
+    #     adapter" a 503 the caller can see rather than a 200 for mail nobody
+    #     receives. The provoke for it is the same shape as the others and lives
+    #     with the code that can reach it, because provoking it means substituting
+    #     the mailer's adapter.
     @unreachable %{
       "403" => {"Principal", "`CourierWeb.Plugs.Principal` answers 401 and nothing else"},
       "415" => {"pass:", "the parser is configured `pass: [\"*/*\"]` and refuses nothing"},
-      "429" => {"no limiter", "thirty rapid writes answer thirty 201s"},
-      "503" => {"readyz", "only `GET /readyz` sends it, and that is not an operation"}
+      "429" => {"no limiter", "thirty rapid writes answer thirty 201s"}
     }
 
     test "no operation declares one", %{responses: responses} do

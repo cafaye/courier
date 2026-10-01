@@ -199,24 +199,35 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 822
+          bin/assert-suite "$log" "whole suite (bin/prime)" 918
       #
-      # Measured on the MERGED tree after the provider-adapter packet, from a
-      # complete run. Whole suite 822. The tiers are the point of recording it,
-      # and one of them is the interesting number: the DATABASE TIER HAS NOW NOT
-      # MOVED ACROSS FOUR PACKETS. It was 421 when the preferences packet landed
-      # and it is 421 now, through the observability packet, the error-reporting
-      # packet and the provider-adapter packet — because not one of those tests
-      # touches `Courier.Repo`, which is exactly what that tier is a count of.
-      # A tier that moved on every merge would be counting commits; a tier that
-      # only moves when its own subject moves is counting what it claims.
+      # Measured on the tree carrying `POST /v1/messages`, from a complete run.
+      # Whole suite 918. The tiers are the point of recording it, and BOTH of them
+      # moved for the first time in four packets: 405 with no database and 513 with
+      # one.
       #
-      # No incoming number described this tree. The error-reporting packet
-      # measured 724 on a branch without the observability tests; the adapter
-      # packet measured 728 on a branch without the error-reporting tests. A
-      # floor is a claim about the tree it lives in, so it is measured there.
+      # The database tier moved because the send surface is a database tier by
+      # construction — `POST /v1/messages` writes an outbox row, reads the
+      # recipient's preferences and consults `email_suppressions`, so every test
+      # behind it goes through `CourierWeb.ConnCase` and the Ecto sandbox. The
+      # no-database tier moved by exactly 4, and those 4 are the
+      # `router_test.exs` assertions, which read `Phoenix.Router.route_info/4` and
+      # touch no database at all. A tier that grew because its own subject grew is
+      # counting what it claims; one that grew by coincidence would not be.
+      #
+      # 918 is also 405 + 513, which is the consistency check worth making: a whole
+      # suite that is not the sum of its own tiers is a suite where a file has been
+      # left out of both.
+      #
+      # No incoming number described this tree. The suppression packet (90d95f7)
+      # measured nothing in CI at all — its 31 tests were never reflected in this
+      # file, which is why the `database` floor said 421 while the tier actually
+      # held 452 before this packet added anything. That is the failure mode of a
+      # floor nobody re-measures: the *floor* stayed green because it is a decrease
+      # detector, while the *labels* above it quietly stopped describing the tree.
+      # Both were wrong and only one of them would have failed a build.
 
-      - name: tier — no database (401 tests, 20 files)
+      - name: tier — no database (405 tests, 20 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -247,9 +258,9 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 401
+          bin/assert-suite "$log" "no database" 405
 
-      - name: tier — database (421 tests, 21 files)
+      - name: tier — database (513 tests, 24 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
         # and therefore through the Ecto SQL sandbox: the SQL layer, the
         # migrations `mix ecto.setup` applies, Oban's tables, and the
@@ -273,7 +284,7 @@ jobs:
             echo "::error::the database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "database" 421
+          bin/assert-suite "$log" "database" 513
 
       - name: tier — the SSRF table (62 tests, in-memory resolver)
         # courier-03's table, run on its own so the log carries a line that can
@@ -348,9 +359,9 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 822 passed | \`bin/assert-suite\` |"
-            echo "| no database, 20 files | 401 passed | tier step |"
-            echo "| database, 21 files | 421 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 918 passed | \`bin/assert-suite\` |"
+            echo "| no database, 20 files | 405 passed | tier step |"
+            echo "| database, 24 files | 513 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
             echo "| mix.lock | no diff after the gate | lockfile step |"

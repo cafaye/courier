@@ -79,6 +79,14 @@ defmodule CourierWeb.Router do
 
     post "/webhook_endpoints", WebhookEndpointsController, :create
     post "/webhook_endpoints/:id/test", WebhookEndpointsController, :ping
+
+    # courier's only door into its send path, and the reason this scope exists in
+    # the shape it does. It is behind `:idempotent` for the reason every other POST
+    # here is: a send is not idempotent by HTTP's definition, so a caller that
+    # timed out would otherwise mail somebody twice, and it is behind
+    # `:authenticated` because an unauthenticated POST to a mail egress is an open
+    # relay.
+    post "/messages", MessagesController, :create
   end
 
   scope "/api", CourierWeb do
