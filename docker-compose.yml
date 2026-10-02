@@ -1,15 +1,52 @@
 # courier's own compose file — an OVERRIDE, not a copy.
 #
 #   bin/dev            # fetch the pinned kit stack, merge it with this file, up
-#   docker compose -f <kit>/templates/compose/docker-compose.yml \
-#                  -f ./docker-compose.yml up -d --wait
 #
-# THIS FILE OWNS FOUR THINGS AND NOTHING ELSE
+# USE `bin/dev`. The manual form works, and this file used to print it here
+# WITHOUT the variable that makes it work:
+#
+#   KIT_COMPOSE_DIR=<kit>/templates/compose \
+#   docker compose --project-directory . \
+#     -f <kit>/templates/compose/docker-compose.yml \
+#     -f ./docker-compose.yml up -d --wait
+#
+# `KIT_COMPOSE_DIR` is not optional and omitting it is silent. kit's compose file
+# resolves its own build contexts and bind mounts through
+# `${KIT_COMPOSE_DIR:-.}`, and compose resolves a relative path against the
+# PROJECT DIRECTORY — which `--project-directory .` sets to courier's root. Drop
+# the variable and the postgres initdb mount resolves to `<courier>/postgres/
+# initdb`, a directory that does not exist, which Docker creates as an empty one.
+# Measured on this file after the workaround described below was deleted:
+#
+#   $ docker compose --project-directory . -f <kit>/… -f ./docker-compose.yml config
+#       source: /Users/…/wt-m39-courier-27/postgres/initdb        <- courier's tree
+#   $ KIT_COMPOSE_DIR=<kit>/templates/compose docker compose … config
+#       source: /Users/kaka/.cache/cafaye/kit/f6d3b74…/templates/compose/postgres/initdb
+#
+# The cluster comes up healthy either way, holding none of the fleet's
+# databases. `bin/dev` sets the variable for exactly that reason, and the
+# override this file used to carry had the same bug wearing a workaround's
+# clothes.
+#
+# THIS FILE OWNS THREE THINGS AND NOTHING ELSE
 #
 #   1. the `postgres` service's database name and role   (kit ships the CLUSTER)
-#   2. two of kit's paths, re-pointed at the fetched tree   (see below)
-#   3. the `courier` service: its image, its port, its environment
-#   4. the crash layer: where this container's stdout/stderr goes
+#   2. the `courier` service: its image, its port, its environment
+#   3. the crash layer: where this container's stdout/stderr goes
+#
+# IT USED TO OWN A FOURTH, and the reason it no longer does is worth one line
+# because it is the second time this file has carried a workaround for a kit
+# defect. It re-pointed two of kit's own paths — the postgres build context and
+# the initdb bind — at the fetched tree, because kit wrote them as bare
+# `./postgres` and `bin/dev` runs compose with `--project-directory .`, the
+# courier root, so compose resolved them to `<courier>/postgres`. That directory
+# does not exist; Docker creates a missing bind source as an empty one; the
+# mount succeeded, initdb ran nothing, and the cluster came up green holding
+# none of the fleet's databases.
+#
+# kit@f6d3b74 prefixes both paths itself. The workaround is deleted rather than
+# left commented, because a comment saying "delete this when kit is fixed" is
+# a comment that survives the fix.
 #
 # WHY THERE IS NO `postgres:` CONTAINER HERE ANY MORE, and it is the first thing a
 # reader will look for. kit's stack already ships one, and a second copy is two
@@ -49,50 +86,7 @@ services:
     # that, and every line in it is load-bearing.
     #
     # ---------------------------------------------------------------------
-    # 1. THE TWO PATHS
-    # ---------------------------------------------------------------------
-    #
-    # kit's postgres service is the only service in the whole stack whose
-    # `build: context:` and whose bind mount are written as bare `./postgres`
-    # rather than `${KIT_COMPOSE_DIR:-.}/postgres`. Every other one of kit's six
-    # bind mounts carries that prefix, and `bin/dev` sets `KIT_COMPOSE_DIR` to the
-    # FETCHED tree precisely because `--project-directory .` makes compose resolve
-    # a relative path in the base file against the service repository instead.
-    #
-    # So without these two lines compose resolves them to `<courier>/postgres`,
-    # which does not exist. Measured on kit@1770009, with courier's override and
-    # nothing else changed:
-    #
-    #     build:
-    #       context: /Users/…/courier/postgres          <- courier's tree
-    #     volumes:
-    #       - type: bind
-    #         source: /Users/…/courier/postgres/initdb  <- courier's tree
-    #         target: /docker-entrypoint-initdb.d
-    #
-    # Docker's answer to a missing bind source is to CREATE the directory, so the
-    # mount succeeds, the directory is empty, and the entrypoint says:
-    #
-    #     /usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
-    #
-    # The cluster comes up GREEN. No role per service, no `REVOKE`, no
-    # `KIT_POSTGRES_DATABASES` — the whole provisioning contract silently absent,
-    # and the only symptom is a line in the log nobody reads. This is the same
-    # failure `bin/dev` already documents for grafana ("the failure arrives four
-    # containers later"), reproduced one service over.
-    #
-    # These two lines are a WORKAROUND for kit, not a design, and they go away the
-    # day kit prefixes its own two paths. They are here rather than a patch to kit
-    # because a service does not edit the shared stack it fetches: the pin moves,
-    # the patch does not.
-    build:
-      context: ${KIT_COMPOSE_DIR:-.}/postgres
-      dockerfile: Dockerfile
-    volumes:
-      - ${KIT_COMPOSE_DIR:-.}/postgres/initdb:/docker-entrypoint-initdb.d:ro
-
-    # ---------------------------------------------------------------------
-    # 2. WHAT COURIER DECLARES, AND WHAT IT MUST NOT
+    # 1. WHAT COURIER DECLARES, AND WHAT IT MUST NOT
     # ---------------------------------------------------------------------
     #
     # `KIT_POSTGRES_DATABASES` is the single place courier's database AND its role
