@@ -115,34 +115,51 @@ gate:
       # is that "nothing on local disk" is a claim about courier's columns rather
       # than about a comment.
       #
-      # **Remeasured on the tree carrying the door opener: 1218 whole-suite tests,
-      # so 1212 with the same margin of 6.** The 62 this packet adds split
-      # **46 / 16**, and the split is the design rather than an accident:
+      # **Remeasured on the tree carrying the one-click unsubscribe: 1282
+      # whole-suite tests, so 1276 with the same margin of 6.** The 64 this packet
+      # adds are NOT all in the database tier, and the one number that went DOWN is
+      # the one worth reading twice:
       #
-      #   * `test/courier/principal/introspection/document_test.exs` (17),
-      #     `test/courier/principal/introspection_test.exs` (18) and
-      #     `test/courier/principal/introspection/transport_req_test.exs` (11) all
-      #     belong to the no-database tier, because authentication touches no
-      #     `Courier.Repo` and has to be checkable on a runner with no database at
-      #     all. A door whose only tests need postgres is a door nobody has checked
-      #     on the machine where it breaks.
-      #   * `test/courier_web/plugs/principal_config_test.exs` (16) is a
-      #     `CourierWeb.ConnCase` because its subject is the RESPONSES and the
-      #     document: it drives real requests through the real router to read the
-      #     401, the 503, the halt, and `openapi.yaml`'s 503 declaration. A status
-      #     asserted on the plug rather than over a request is a status no client
-      #     ever receives.
+      # **The no-database tier went 623 -> 619 and the database tier went 595 ->
+      # 663.** `test/courier/telemetry_canary_test.exs` moved from the first to the
+      # second, and it moved because of what it asserts rather than where it sits:
+      # every request that file drove was refused before it reached a controller
+      # that touches a database, which is why a file with no sandbox could drive
+      # the real router. The one-click unsubscribe is the first route in that file
+      # whose 404 depends on a row, so its canary needs a sandbox — and a canary
+      # proved on a request the `:accepts` plug refuses would keep the file in the
+      # no-database tier while the tier's own claim ("these tests never touch
+      # `Courier.Repo`") quietly stopped being true. The tier is a statement about
+      # what the tests do, so the file followed the code.
       #
-      # 1218 is also 623 + 595, which is the consistency check above restated.
+      # The 64 the packet adds, split by why each file is where it is:
       #
-      # The previous value here was 1150 against a measured 1156. The value before
-      # that was 1128 against a measured 1134, remeasured on the MERGED tree after
-      # the inbound base and the event builders. The value before that was 918
-      # against a measured 918+6, and the one before that was 816 against a
-      # measured 630, raised by the observability packet in the same commit that
-      # added its 62 tests. Every one of those is this rule: the floor moves in the
-      # same commit that changes what courier verifies.
-      minimum: 1212
+      #   * **the database tier**, 68: 21 from
+      #     `test/courier/unsubscribes_test.exs` (it writes a row in
+      #     `email_suppressions` and reads the send path's refusals back), 5 from
+      #     `test/courier/unsubscribe_headers_test.exs` (the negative case is a
+      #     statement about a table with no token rows in it), 19 from
+      #     `test/courier_web/controllers/unsubscribe_controller_test.exs` (real
+      #     HTTP against a route whose answer depends on a row), 4 from
+      #     `test/courier/deliver_test.exs` (the send path's own new refusal, in
+      #     the file that owns the send path's refusals) and 19 from the two files
+      #     that gained tests where their claims already lived: the router and the
+      #     canary.
+      #   * **the no-database tier**, -4: the canary file's 10 moved out, and the
+      #     other 14 are the net of the new tests in files that touch no repo.
+      #
+      # 1282 is also 619 + 663, which is the consistency check above restated: a
+      # whole suite that is not the sum of its own tiers is a suite where a file
+      # has been left out of both.
+      #
+      # The previous value here was 1212 against a measured 1218, and the one
+      # before that 1150 against a measured 1156, remeasured on the MERGED tree
+      # after the inbound base and the event builders. The value before that was
+      # 1128 against a measured 1134, 1067 against a measured 1073, 672 against a
+      # measured 678, 722 against 728, 816 against 822, and 912 against 918. Every
+      # one of those is this rule: the floor moves in the same commit that changes
+      # what courier verifies.
+      minimum: 1276
 
 external:
   # NOT self-contained, and saying so is the point. The gate needs a postgres

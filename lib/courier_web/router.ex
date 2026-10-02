@@ -177,6 +177,36 @@ defmodule CourierWeb.Router do
     post "/resend", InboundController, :create
   end
 
+  # The one-click unsubscribe, and it is outside `/v1` for the same reason
+  # `/inbound` is: the only operation under `/v1` is authenticated with a bearer
+  # token, and a mail client holds none.
+  #
+  # **RFC 8058 §3.1 says the request must not carry authorization at all** — "The
+  # POST request MUST NOT include cookies, HTTP authorization, or any other
+  # context information" — so there is no `:authenticated` here and there could
+  # not be. The credential is the token in the path, which is a resource address
+  # rather than a presented secret, and it is 32 bytes of `:crypto.
+  # strong_rand_bytes/1` stored as a digest. `CourierWeb.Plugs.Principal` behind
+  # this route would 401 every mail client in the world.
+  #
+  # **Both verbs, on one path, and that is §3.2's own sentence**: "The target of
+  # the POST action is the same as the one in the GET action for a manual
+  # unsubscription". Some clients only ever follow a link, and a bulk sender whose
+  # header points at a 405 is a bulk sender whose unsubscribe requirement is not
+  # met by the clients people actually use.
+  #
+  # `:api` and nothing else, so the 406 every operation in `openapi.yaml` declares
+  # comes from the same plug it comes from everywhere else. Deliberately **not**
+  # `:idempotent`: `CourierWeb.Plugs.Idempotency` is scoped to a principal, there
+  # is none, and the replay is answered by the stored preference instead — see
+  # `Courier.Unsubscribes`.
+  scope "/unsubscribe", CourierWeb do
+    pipe_through :api
+
+    get "/:token", UnsubscribeController, :show
+    post "/:token", UnsubscribeController, :create
+  end
+
   scope "/api", CourierWeb do
     pipe_through :api
   end

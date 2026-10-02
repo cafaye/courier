@@ -148,6 +148,75 @@ defmodule CourierWeb.RouterTest do
     end
   end
 
+  describe "the one-click unsubscribe surface" do
+    alias CourierWeb.UnsubscribeController
+
+    test "GET and POST /unsubscribe/:token resolve to the unsubscribe controller" do
+      # Both verbs, on one path, and that is RFC 8058 §3.2's own sentence: "The
+      # target of the POST action is the same as the one in the GET action for a
+      # manual unsubscription." A bulk sender whose header points at a 405 has not
+      # met the requirement by the clients people actually use.
+      assert %{plug: UnsubscribeController, plug_opts: :show, route: "/unsubscribe/:token"} =
+               Phoenix.Router.route_info(Router, "GET", "/unsubscribe/abc", "")
+
+      assert %{plug: UnsubscribeController, plug_opts: :create, route: "/unsubscribe/:token"} =
+               Phoenix.Router.route_info(Router, "POST", "/unsubscribe/abc", "")
+    end
+
+    test "and it is NOT behind the authenticated pipeline, which RFC 8058 forbids" do
+      # §3.1: "The POST request MUST NOT include cookies, HTTP authorization, or
+      # any other context information." A mail client holds no bearer token, sends
+      # no cookie, and is not allowed to send either — so behind
+      # `CourierWeb.Plugs.Principal` **every one-click unsubscribe in the world
+      # would be a 401**, and Gmail and Yahoo require the button to work.
+      #
+      # This is the same claim `receiveResendReport` makes for a different reason,
+      # and the assertion is here rather than left to the controller's own tests
+      # because those go through the same router and would agree with a router that
+      # did not have the pipeline.
+      for verb <- ~w(GET POST) do
+        assert %{pipe_through: pipelines} =
+                 Phoenix.Router.route_info(Router, verb, "/unsubscribe/abc", "")
+
+        refute :authenticated in pipelines,
+               "#{verb} /unsubscribe must not be behind the principal plug"
+
+        assert :api in pipelines,
+               "#{verb} /unsubscribe must be behind :api, so the 406 openapi.yaml " <>
+                 "declares comes from the same plug it comes from everywhere else"
+      end
+    end
+
+    test "and NOT behind the idempotency plug, because the index is the dedup" do
+      # `CourierWeb.Plugs.Idempotency` is scoped to a principal, which this route
+      # has none of, and the header a mail client would have to send is one RFC 8058
+      # forbids it from sending. The deduplication that answers a retry is
+      # `email_suppressions`' unique index on `(provider, provider_event_id)` with
+      # the token's id as the key — the same answer a redelivered provider report
+      # gets, from the same index.
+      assert %{pipe_through: pipelines} =
+               Phoenix.Router.route_info(Router, "POST", "/unsubscribe/abc", "")
+
+      refute :idempotent in pipelines
+    end
+
+    test "and its path is outside /v1, because it is not a tenant operation" do
+      # Every operation under `/v1` is behind a bearer token in `openapi.yaml`, so
+      # an operation filed there that cannot take one is a method a generated
+      # client will call wrongly — `PLAN.md` MD6 builds those clients from the
+      # document.
+      refute String.starts_with?("/unsubscribe/:token", "/v1")
+    end
+
+    test "and it answers no other method" do
+      for verb <- ~w(PUT PATCH DELETE HEAD) do
+        assert :error == Phoenix.Router.route_info(Router, verb, "/unsubscribe/abc", ""),
+               "#{verb} /unsubscribe is served, and a route with a verb nobody " <>
+                 "documented is a verb a generated client will try"
+      end
+    end
+  end
+
   describe "the webhook endpoints surface" do
     alias CourierWeb.WebhookEndpointsController
 

@@ -14,6 +14,49 @@ document lands in both files in one commit, because core asserts the two agree.
 
 ### Added
 
+- **A recipient can unsubscribe from bulk mail with one click, and courier stops
+  sending it.** Gmail and Yahoo's bulk-sender requirements (enforced since June
+  2024) are about RFC 8058: a `List-Unsubscribe` header whose HTTPS URI a mail
+  client `POST`s to on the recipient's behalf, with no session and no
+  confirmation page. courier had none of it, and an email product that ships
+  without it lands in spam. `Courier.Mailers.kinds/0` and
+  `Courier.Unsubscribes` are the gate; `POST` and `GET /unsubscribe/{token}` are
+  the door. `openapi.yaml` is at **2.3.0**: one additive path with two
+  operations, a new tag, a new `UnsubscribeToken` parameter, an
+  `UnsubscribeResult` schema, one new reusable response, and one new
+  `errors[].code`. No existing path, verb, request field or response shape
+  changed.
+  - **The kind is the code's, not a caller's.** `Courier.Mailers.kinds/0` is a
+    closed table over the types courier can send, and its default for an
+    unclassified type is `:transactional` — so a new notification type cannot
+    grow an unsubscribe link by omission. All three types are transactional
+    today, so **nothing courier sends carries the header**, and that negative is
+    asserted on real composed messages per type and on the raw SMTP `DATA` a
+    real `gen_smtp` server received.
+  - **The token in the path is the whole authorization**, and it is stored as a
+    SHA-256 and never as itself: 32 bytes of `:crypto.strong_rand_bytes/1`, so a
+    database dump is not a list of mailboxes anybody can unsubscribe. RFC 8058
+    §3.1 forbids the request from carrying cookies or authorization at all, which
+    is why the route is outside `/v1` and behind no auth plug; an unknown token
+    is a **404** rather than a 401, because it is a resource's address. No status
+    redirects (§3.1's MUST NOT), and a replay is the same 200 with the same
+    body.
+  - **An unsubscribe writes an `email_suppressions` row with no `state`**, and
+    the absent state is the mechanism rather than a detail: a bounce and a
+    complaint are facts about the mailbox and stop every type courier sends, so a
+    stateful unsubscribe row would be a person who stops receiving product
+    updates and then cannot reset their password. It publishes
+    `courier.notification.suppressed` with `reason: "preference_off"` in the same
+    transaction — the first caller that type has had, and the manifest already
+    declared it.
+  - **Two things the packet cannot deliver, stated rather than implied.** RFC 8058
+    §4 requires a DKIM signature covering both headers and listed in the `h=`
+    tag; courier submits through a relay and holds no private key for the sending
+    domain, so the signing is the relay's. And an unsubscribe row is immutable,
+    as every row in that table is, so **no route clears one** — the remedy for an
+    accidental unsubscribe is another address, and a route that clears one belongs
+    with the first bulk type rather than in this commit.
+
 - **courier hears what happened to a message, and a hard-bounced address stops
   being mailed.** `Courier.Suppressions.ingest/1` was written, tested and
   documented as "the HTTP surface's entry point" — and nothing called it. The

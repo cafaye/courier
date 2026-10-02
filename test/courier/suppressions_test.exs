@@ -417,6 +417,11 @@ defmodule Courier.SuppressionsTest do
       # The provider's payload is a bounce report: addresses, reasons, sometimes a
       # snippet. courier stores the four facts it acts on and nothing else, so a
       # schema addition cannot quietly turn into a copy of somebody's inbox.
+      #
+      # `notification_type` and `user_id` arrived with the one-click unsubscribe
+      # and are the two exceptions, and the assertion names them rather than
+      # loosening the list: a column holding a payload is what this test is for, and
+      # a test that grows a list silently is a test that stopped looking.
       fields =
         Suppression.__schema__(:fields)
         |> Enum.map(&String.replace_prefix(to_string(&1), "_", ""))
@@ -424,7 +429,7 @@ defmodule Courier.SuppressionsTest do
 
       assert fields ==
                Enum.sort(~w(id email state provider provider_event_id reason message_id
-                            occurred_at inserted_at updated_at))
+                            occurred_at notification_type user_id inserted_at updated_at))
     end
   end
 

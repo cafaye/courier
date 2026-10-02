@@ -14,24 +14,23 @@
 # prevents from recurring. They are the other half of the public surface, not an
 # afterthought, and they are documented as thoroughly as the webhooks.
 #
-# > **Every operation in this document is authenticated, and exactly one of them
-# > is authenticated by a SIGNATURE rather than by a token.** That one is
-# > `receiveResendReport`, and it is the first operation in this file that is not
-# > behind `CourierWeb.Plugs.Principal`. The paragraph above used to say "every
-# > operation in this document is authenticated" with no exception, and it was
-# > true — which is precisely why it needed replacing rather than extending: a
-# > blanket claim is the shape that hides the first exception.
+# > **Every operation in this document is authenticated, and exactly two of them
+# > are not authenticated by a token.** They are the two exceptions, and they are
+# > named here because a blanket claim is the shape that hides the first
+# > exception — and this file now has two, for two different reasons, so the
+# > blanket claim had to be replaced rather than extended.
 # >
-# > It is an exception because an inbound provider webhook is not a tenant
-# > operation. Resend signs its webhook with Svix and sends no bearer token, so a
-# > principal would answer every delivery with a `401`; and behind no plug at all
-# > it would be an unauthenticated `POST` that records suppressions, which is a
-# > denial of service on the whole product delivered by the feature meant to
-# > prevent it. Core settles it, in `docs/openapi-conventions.md` §Auth: "Inbound
-# > webhooks are **not** JWT-authenticated: they are signed, per the sender's
-# > convention, and the receiver checks the signature before parsing." So the
-# > operation declares `security: [{webhookSignature: []}]` and nothing else, and
-# > the document can say that truthfully because the router agrees:
+# > **`receiveResendReport` is authenticated by a SIGNATURE.** An inbound provider
+# > webhook is not a tenant operation. Resend signs its webhook with Svix and sends
+# > no bearer token, so a principal would answer every delivery with a `401`; and
+# > behind no plug at all it would be an unauthenticated `POST` that records
+# > suppressions, which is a denial of service on the whole product delivered by
+# > the feature meant to prevent it. Core settles it, in
+# > `docs/openapi-conventions.md` §Auth: "Inbound webhooks are **not**
+# > JWT-authenticated: they are signed, per the sender's convention, and the
+# > receiver checks the signature before parsing." So the operation declares
+# > `security: [{webhookSignature: []}]` and nothing else, and the document can say
+# > that truthfully because the router agrees:
 # > `test/courier_web/router_test.exs` asserts it is **not** behind the
 # > authenticated pipeline and that it is behind `:api`.
 # >
@@ -41,6 +40,44 @@
 # > `NotificationPreferencesNotFound` made, for the same reason: a different
 # > meaning wants a different sentence.
 # >
+# > **`oneClickUnsubscribe` and `unsubscribeByLink` are authenticated by the
+# > OPAQUE TOKEN IN THEIR PATH**, and they declare `security: []` — which says
+# > "this operation presents no credential scheme", **not** "this operation is
+# > unauthenticated". The distinction is the point, and it is worth reading twice
+# > because `security: []` is exactly the spelling courier-05 used by mistake:
+# >
+# >   * RFC 8058 §3.1 forbids this request from carrying authorization at all —
+# >     "The POST request MUST NOT include cookies, HTTP authorization, or any
+# >     other context information." A mail client holds no bearer token, sends no
+# >     cookie, and is not allowed to send either. Behind
+# >     `CourierWeb.Plugs.Principal` **every one-click unsubscribe in the world
+# >     would be a 401**, and Gmail and Yahoo require the button to work.
+# >   * What the token *is* is stated in full in the `UnsubscribeToken` parameter:
+# >     32 bytes of `:crypto.strong_rand_bytes/1`, stored only as a SHA-256, with
+# >     the address nowhere in it. An unknown one is a **404**, not a 401, because
+# >     it is a resource address rather than a presented credential.
+# >
+# > So these two are the only operations in this file that a generated client has
+# > no business calling, and the document says so on each of them. They are here
+# > because `test/courier_web/openapi_document_test.exs` holds this file and the
+# > router to each other in both directions: a route the router serves and this
+# > file does not describe is a method the next generated client will not have,
+# > and an operation filed under `/v1` that cannot take a bearer token is a method
+# > a generated client *will* call wrongly. Both failure modes are worse than the
+# > two exceptions above.
+# >
+# > **Two of core's own rules therefore report on these three operations, and that
+# > is measured rather than assumed.** `cafaye-contract lint` fails
+# > `openapi.paths-are-versioned` for all three paths and
+# > `openapi.idempotency-key` for the two `POST`s — the same two rules, on the
+# > same two grounds, before and after this packet added a third operation
+# > (`/inbound/resend` was already reported by both at `2.2.0`). The harness
+# > cannot know that a mail client is not a tenant or that a mail client is
+# > forbidden by RFC 8058 §3.1 from sending a header, and both are load-bearing
+# > enough to be worth a contract violation rather than a compromise: version
+# > these paths and a generated client sends a bearer token to a mail client that
+# > will never present one.
+# >
 # > The two notification-preferences operations, which are the other half of that
 # > history, were once served with `security: []` and a `> DECISION NEEDED
 # > (courier-05)` above this line recording the gap. That is closed: both are
@@ -48,6 +85,8 @@
 # > because there was no 2.x client. `receiveResendReport` is the first operation
 # > in this file with `security` other than `bearerAuth`, and it is not a gap — it
 # > is the only way an inbound webhook can be authenticated truthfully.
+# > `oneClickUnsubscribe` and `unsubscribeByLink` are the second and third, and
+# > each says in its own description what stands in for the credential.
 #
 # The three answers on those two operations are the same three the webhooks give,
 # because they go through the same plug and are decided in the same context:
@@ -297,7 +336,7 @@ info:
   # operation filed under `/v1` that cannot take a bearer token is a method a
   # generated client will call wrongly. The checklist's line is about the
   # customer-facing API; an inbound webhook is not one.
-  version: 2.2.0
+  version: 2.3.0
   title: caFaye courier
   description: |
     Transactional email, notification preferences, and outbound webhooks.
@@ -341,6 +380,13 @@ tags:
       complaint, a temporary failure. courier acts on the first two by suppressing
       the address, and this is the only operation in this document a **provider**
       calls — signed, not token-authenticated, because a provider is not a tenant.
+  - name: unsubscribe
+    description: |
+      The [RFC 8058](https://www.rfc-editor.org/rfc/rfc8058) one-click endpoint
+      every bulk message's `List-Unsubscribe` header points at. A **mail client**
+      calls it, on the recipient's behalf, with no session and no credential
+      header; the opaque token in the path is the whole of the authorization.
+      Nothing here is for a generated client.
 
 security:
   - bearerAuth: []
@@ -517,6 +563,152 @@ paths:
         '422': { $ref: '#/components/responses/ReportNotActionable' }
         '500': { $ref: '#/components/responses/Internal' }
         '503': { $ref: '#/components/responses/ReportNotRecorded' }
+
+  /unsubscribe/{token}:
+    parameters:
+      - $ref: '#/components/parameters/UnsubscribeToken'
+    get:
+      tags: [unsubscribe]
+      operationId: unsubscribeByLink
+      summary: Unsubscribe, for a client that only ever follows a link
+      security: []
+      description: |
+        The same effect as `oneClickUnsubscribe`, over `GET`, for the clients that
+        only fetch. RFC 8058 §3.2 says the one-click POST target is "the same as
+        the one in the GET action for a manual unsubscription", and some mail
+        clients and some corporate link scanners only ever follow a link — so a
+        bulk sender whose header points at a `405` has not met the requirement by
+        the clients people actually use.
+
+        **The response is JSON, not a confirmation page.** courier renders no
+        HTML at all: it is an API-only service, and this operation is the first
+        thing in this document a person might open in a browser. The consequence is
+        stated rather than hidden — somebody who follows the link by hand sees a
+        small JSON object saying the same thing the mail client's button would
+        have done, and there is no prettier version of it here.
+
+        ## Who this is for, and what authenticates it
+
+        **A mail client or a person, on the recipient's behalf.** Not a tenant and
+        not a provider, which is why it is outside `/v1` and declares no security
+        scheme at all:
+
+          * RFC 8058 §3.1: "The POST request MUST NOT include cookies, HTTP
+            authorization, or any other context information." A mail client holds
+            no bearer token, sends no cookie, and is forbidden from sending either.
+          * The **token in the path is the whole of the authorization** — 32 bytes
+            of cryptographic randomness, stored only as a SHA-256 — and it is a
+            resource address rather than a presented credential, which is why an
+            unknown one is a `404` and not a `401`.
+
+        `security: []` says "this operation presents no credential scheme", which
+        is true and is *not* the same as "this operation is unauthenticated" — the
+        token is checked, and an `UnsubscribeToken` parameter is declared
+        describing exactly what it is.
+
+        ## No redirect, ever
+
+        RFC 8058 §3.1: "The mail sender MUST NOT return an HTTPS redirect, since
+        redirected POST actions have historically not worked reliably, and many
+        browsers have turned redirected HTTP POSTs into GETs." So a success is the
+        `200` below and no status on this operation carries a `Location` header.
+        A redirect here would be the one thing that works for a browser and
+        silently breaks the mail client that matters.
+
+        ## Nothing in a response is about a mailbox
+
+        `{"data": {"status": "unsubscribed"}}` and nothing else — no address, no
+        user id, no notification type, on any status. This is an unauthenticated
+        surface, so anything echoed back is available to whoever found the URL, and
+        the token is not a session.
+      responses:
+        '200':
+          description: This notification type is off for this address
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UnsubscribeResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/UnsubscribeNotRecorded' }
+    post:
+      tags: [unsubscribe]
+      operationId: oneClickUnsubscribe
+      summary: Unsubscribe, as a mail client does it in one click
+      security: []
+      description: |
+        The door every bulk message's `List-Unsubscribe` header points at. RFC
+        8058 §3.1 requires the sender to advertise a one-click endpoint with
+
+            List-Unsubscribe: <https://…/unsubscribe/{token}>
+            List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+        and the mail client then POSTs to that URI on the recipient's behalf, with
+        no session, no cookie and no confirmation page. Gmail's and Yahoo's
+        bulk-sender requirements, in force since June 2024, are enforced against
+        exactly this.
+
+        Everything about who calls this, what authenticates it, and why there is no
+        redirect is on `unsubscribeByLink` above — the two operations differ only
+        in the verb, which is §3.2's own arrangement.
+
+        ## The body is ignored, and the content type is not required
+
+        RFC 8058 §3.2 says the receiver "sends the key/value pair in the
+        `List-Unsubscribe-Post` header as the request body", and gives
+        `application/x-www-form-urlencoded` or `multipart/form-data` as the
+        encodings. **courier reads none of it.** The same section says "Since there
+        is no provision for extra POST arguments, any information about the message
+        or recipient is encoded in the URI" — so a body is by definition
+        informational, and a body that is absent, empty, urlencoded, multipart or
+        something else entirely reaches the same two answers. The `400` below is
+        the one exception and it is not about this operation's logic: it is
+        `Plug.Parsers` refusing a body it was told to parse and could not, which
+        is a body that is not valid JSON on a route configured to read JSON.
+
+        ## A replay is the same 200, and it writes nothing
+
+        A mail client is entitled to retry: a `POST` that timed out is a `POST`
+        courier cannot distinguish from one that worked. So the second call answers
+        the **same status with the same body**, writes nothing, and publishes no
+        second event — the deduplication is the stored preference itself, not a
+        header. A `409` would send the client round a retry loop over something
+        that is already true.
+
+        `Idempotency-Key` is absent for the same reason it is absent on
+        `receiveResendReport`, and for one more: `CourierWeb.Plugs.Idempotency` is
+        scoped to a principal, and RFC 8058 §3.1 forbids this request from
+        carrying authorization at all.
+
+        ## What it changes, and what it does not
+
+        It records the recipient's own answer — `email_enabled: false` for that
+        user and that notification type — so the next send of that type is refused
+        with the `422` `sendMessage` already returns for a declined preference, and
+        it publishes `courier.notification.suppressed` with
+        `reason: "preference_off"`.
+
+        **It is scoped to one notification type and does not touch the rest.** A
+        bulk unsubscribe is not a fact about the mailbox, and courier's suppression
+        list *is* a fact about the mailbox: an `email_suppressions` row refuses a
+        password reset as firmly as it refuses a newsletter, so an unsubscribe
+        written there would be a person who stops receiving product updates and
+        then cannot reset their password.
+
+        And it is **reversible**: the preference it writes is visible through
+        `GET /v1/notification_preferences/{user_id}` and can be put back through
+        the `PUT` beside it. A suppression row cannot, by construction.
+      responses:
+        '200':
+          description: This notification type is off for this address
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UnsubscribeResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/NotAcceptable' }
+        '500': { $ref: '#/components/responses/Internal' }
+        '503': { $ref: '#/components/responses/UnsubscribeNotRecorded' }
 
   /v1/messages:
     post:
@@ -1264,6 +1456,37 @@ components:
       description: The endpoint's uuid.
       schema: { type: string, format: uuid }
 
+    UnsubscribeToken:
+      name: token
+      in: path
+      required: true
+      description: |
+        **The authorization, and also the resource's address** — which is why a
+        token that names nothing is a `404` and not a `401`.
+
+        32 bytes of `:crypto.strong_rand_bytes/1`, URL-safe base64 with no
+        padding, so 43 characters. courier stores only a SHA-256 of it: the token
+        exists in the `List-Unsubscribe` header of one message and in the mail
+        client that received it, so a database dump is not a list of mailboxes
+        anybody can unsubscribe.
+
+        RFC 8058 §3.1 asks for exactly this — "The URI SHOULD include an opaque
+        identifier or another hard-to-forge component **in addition to, or
+        instead of,** the plaintext names of the list and the subscriber" — and §6
+        gives the reason it is not optional: a malicious mailer could otherwise
+        send spam carrying links to a victim list and cause unsubscriptions "as a
+        side effect of users reporting the spam".
+
+        **The token never names the address.** It is opaque, so an attacker who
+        reads this parameter out of somebody's mail learns nothing about anybody's
+        mailbox beyond what the `To:` header already said, and the row behind it
+        is found by digest rather than by parsing.
+      schema:
+        type: string
+        minLength: 43
+        maxLength: 43
+        pattern: '^[A-Za-z0-9_-]{43}$'
+
     Limit:
       name: limit
       in: query
@@ -1569,6 +1792,32 @@ components:
                     does not exist" is the sentence an operator actually needs, and
                     it lands in courier's logs rather than in the suppression row.
 
+    UnsubscribeResult:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              enum: [unsubscribed]
+              description: |
+                Always this one word, and **the same word on a replay** — a mail
+                client that retries a `POST` courier already honoured gets the
+                answer the first one got rather than an error.
+
+                It is deliberately the whole of the response. No address, no user
+                id, no notification type: the caller is a mail client on an
+                unauthenticated surface, and anything echoed back is available to
+                whoever found the URL. Whether the unsubscribe was *newly* recorded
+                or was already in force is a fact courier's own logs and its
+                outbox hold, not something this surface reports.
+      description: |
+        The answer both `unsubscribe` operations give, and it is the same shape for
+        the `GET` and the `POST` because they are the same action.
+
     NotificationType:
       type: string
       enum: [welcome, password_reset, team_invitation]
@@ -1720,7 +1969,15 @@ components:
                 # changes with three different fixes. A single `invalid_format`
                 # behind all three is a code that tells a sender nothing, and a
                 # refusal a reader cannot act on is a note rather than a diagnosis.
-                enum: [invalid_format, taken, blocked_scheme, blocked_host, blocked_address, dns_failure, unknown_field, required, unknown_notification_type, notification_preferences_disabled, unsupported_event, unknown_bounce_type, invalid_recipient]
+                # `unsubscribed` arrived with the one-click endpoint and is the
+                # third refusal of the same shape and the third *remedy*: a
+                # declined preference is reversible through the `PUT` beside it, a
+                # suppressed mailbox is not courier's to reverse, and a
+                # one-click unsubscribe is neither — `email_suppressions` is
+                # immutable and no route clears a row. Three refusals at one status
+                # behind one code would tell a caller nothing about which of the
+                # three things to do next, so they are told apart here.
+                enum: [invalid_format, taken, blocked_scheme, blocked_host, blocked_address, dns_failure, unknown_field, required, unknown_notification_type, notification_preferences_disabled, unsubscribed, unsupported_event, unknown_bounce_type, invalid_recipient]
               detail:
                 type: string
                 description: |
@@ -1943,11 +2200,47 @@ components:
             code: unavailable
             trace_id: 0af7651916cd43dd8448eb211c80319c
 
+    UnsubscribeNotRecorded:
+      description: |
+        courier read the token and **could not write the answer**. The transaction
+        unwound, so there is no preference without its event and no event about an
+        answer courier does not hold — and the unsubscribe has **not** happened,
+        so the same request is safe to repeat.
+
+        `503` and not `500`, on the same argument `ReportNotRecorded` makes:
+        courier is fine and its database is not, which is the difference between a
+        mail client retrying and a mail client giving up. A mail client that gets
+        this and does not retry has left a recipient subscribed, which is the
+        outcome the one-click requirement exists to prevent.
+
+        **This is not the `Unavailable` a principal's resolver sends.** That one
+        means identity could not be reached; this one means this request could not
+        be recorded, and the two operations are behind different things entirely.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            type: https://errors.cafaye.com/unavailable
+            title: Service unavailable
+            status: 503
+            detail: >-
+              courier could not record this unsubscribe, so nothing was written and no
+              event was published. It is safe to try again.
+            code: unavailable
+            trace_id: 0af7651916cd43dd8448eb211c80319c
+
     NotFound:
       description: |
         No such endpoint, for this account. An endpoint belonging to another
         account is also a 404: core's conventions forbid a 403 here, because it
         leaks the existence of a resource the caller cannot see.
+
+        **On the two `unsubscribe` operations this is "no such token"**, and it is
+        the only status those operations can send for a token courier did not
+        issue. It is a `404` and not a `401` because the token is the resource's
+        address rather than a credential presented to a door, and it covers a token
+        of the wrong shape and one that is not a string as well — one answer, so
+        the endpoint is not an oracle that can be used to test tokens.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -2198,6 +2491,16 @@ components:
         `PUT` beside it, so telling the caller to change something is the accurate
         answer — and `errors[]`, which core reserves for 422 and nothing else, is
         where a client can read that without parsing prose.
+
+        **`errors[0].code` `unsubscribed` is the third answer of that shape, and it
+        is the one with no remedy.** The recipient used the one-click unsubscribe
+        button in an earlier message (RFC 8058), so courier records that and stops
+        sending that notification type. It is a 422 for the same reason the decline
+        is — the recipient's own answer is a per-field refusal — and a separate
+        code because the two need opposite responses: a declined preference is one
+        `PUT` away from being sent again, and an unsubscribe is not. Nothing in
+        this API clears an `email_suppressions` row, and the `detail` says so
+        rather than pointing a caller at a `PUT` that would not help.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

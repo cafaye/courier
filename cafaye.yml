@@ -90,6 +90,28 @@
 #     only reason this was the cheap moment rather than somebody's build break.
 #     The inbound operation is the one entry in this file with a `security` other
 #     than `bearerAuth`, and it is not a reopening of that gap.
+#   - `POST` and `GET /unsubscribe/{token}` are the RFC 8058 one-click door, and
+#     the document is at `2.3.0` because of them — one additive path with two
+#     operations, a new `UnsubscribeToken` parameter, an `UnsubscribeResult`
+#     schema, one new reusable response and one new `errors[].code` (`unsubscribed`
+#     on `sendMessage`), with no existing path, verb, request field or response
+#     shape changed. Two things about it are load-bearing:
+#
+#     * **They are the only operations in the document that a generated client has
+#       no business calling**, and they declare `security: []` — which says "this
+#       operation presents no credential scheme", NOT "this operation is
+#       unauthenticated". RFC 8058 §3.1 forbids the request from carrying cookies
+#       or authorization at all, so a mail client behind `CourierWeb.Plugs.Principal`
+#       would answer every unsubscribe with a `401`; what stands in for the
+#       credential is the opaque token in the path, documented as the
+#       `UnsubscribeToken` parameter, and an unknown one is a 404 rather than a
+#       401 because it is a resource's address.
+#     * **Neither declares a 401, and the document says why on each.** A token
+#       courier did not issue names no resource, which is a 404, and
+#       `test/courier_web/openapi_error_responses_test.exs` provokes every status
+#       this route can send against the document in both directions — so a future
+#       401 here would fail rather than ship.
+#
 #   - `consumes` is empty. courier is not subscribed to anything yet; when it
 #     starts reacting to identity or billing events this is the list, and every
 #     entry has to come with an idempotent consumer, because delivery is
@@ -125,9 +147,16 @@ core: ^0.2.0
 # `Courier.InboundReports` reads it back off the send rather than inventing it.
 #
 # `courier.email.queued` still has no builder, because the send path is
-# synchronous and has no backlog for a queue-depth metric to measure, and
-# `courier.notification.suppressed` has a builder and no caller, because
-# `Courier.Deliver`'s moduledoc still promises no event for a send it refused.
+# synchronous and has no backlog for a queue-depth metric to measure.
+#
+# `courier.notification.suppressed` HAS ITS FIRST CALLER as of the one-click
+# unsubscribe, and the type was already declared above: `POST /unsubscribe/{token}`
+# writes the `email_suppressions` row and this event in the same transaction, with
+# `reason: "preference_off"`. **It is still not called for a refused SEND**, and
+# that is the sentence in `Courier.Deliver` this packet did not change — a person
+# pressing the unsubscribe button in a mail client is a standing answer that
+# changed, which is a different fact from a send courier turned down, and a
+# consumer that cannot tell them apart has been handed a lie.
 exposes:
   # courier's first documented HTTP surface. Written to core's
   # `docs/openapi-conventions.md`: `/v1` prefix, `info.version` present, problem+json

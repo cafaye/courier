@@ -40,14 +40,19 @@ defmodule Courier.Events do
       be worse than no builder: it would publish an event about a message nobody
       reported, which is the same class of lie as a catalog entry with nothing
       behind it.
-    * `courier.notification.suppressed` has a builder and no caller yet either,
-      even though the refusal it describes — `{:error, :suppressed}` and
-      `{:error, {:suppressed_address, state}}` out of `Courier.Deliver` — happens
-      today and `POST /v1/messages` already answers it. Whether courier writes an
-      outbox row for a send it refused is a decision for the module that owns the
-      send, and `Courier.Deliver`'s own moduledoc currently says "no event" for
-      both refusals. That sentence is the thing to argue with; this builder is
-      deliberately not the thing that changes it silently.
+    * `courier.notification.suppressed` has a builder and its first caller as of
+      the one-click unsubscribe, which writes the row in the same transaction as
+      the preference it belongs to. **It is still not called for a refused
+      send**, and that is the sentence in `Courier.Deliver` this packet did NOT
+      change: `POST /unsubscribe/:token` is not a send courier turned down, it is
+      a standing answer that changed, and the type's schema is built for exactly
+      that — the subject is the user, there is no `message_id`, and the `reason` is
+      `preference_off`. Whether courier writes an outbox row for the *other* two
+      refusals — `{:error, :suppressed}` and `{:error, {:suppressed_address,
+      _}}` out of `Courier.Deliver`, which happen today and which `POST
+      /v1/messages` already answers — is still open, and the argument is still
+      `Courier.Deliver`'s to make. A builder that had quietly overridden that
+      promise would be deciding policy in the one file whose job is shapes.
 
   `courier.email.queued` has no builder because courier has no queue. The send path
   is synchronous and documented as such — the provider is dialled inside the
@@ -242,15 +247,21 @@ defmodule Courier.Events do
   `data.email` is here so a consumer can join on whichever the manager picks
   without re-reading anybody's data.
 
-  The refusal itself is `Courier.Deliver`'s, and this builder describes it rather
-  than deciding it: `{:error, :suppressed}` is a user declining and maps to
-  `preference_off`, `{:error, {:suppressed_address, _}}` is a previous bounce or
-  complaint and maps to `address_suppressed`. Which of them to publish is the
-  send path's call, and `Courier.Deliver`'s moduledoc currently promises the
-  opposite — "no mail, no event, no record of a send that did not happen". That is
-  deliberate on both sides: this module's moduledoc says a builder is not an
-  emission, and a builder that quietly overrode the send path's stated promise
-  would be deciding policy in the one file whose job is shapes.
+  ## Its one caller, and what it is not
+
+  `Courier.Unsubscribes` calls this from the one-click endpoint, in the same
+  transaction as the `notification_preferences` row that turns the type off. The
+  mapping is the one the enum was drawn for: `reason: "preference_off"`, because
+  the user turned the type off — a `preference_off` that no send attempted.
+
+  That is also why this is **not** the send path's refusal. `{:error, :suppressed}`
+  and `{:error, {:suppressed_address, _}}` out of `Courier.Deliver` would map to
+  `preference_off` and `address_suppressed` respectively, and which of them to
+  publish is still `Courier.Deliver`'s call: its moduledoc promises "no mail, no
+  event, no record of a send that did not happen" and this packet did not touch
+  that sentence, because a send courier refused and an answer a user changed are
+  two different facts and a consumer that cannot tell them apart has been handed
+  a lie.
   """
   @spec suppressed(keyword()) :: map()
   def suppressed(opts) when is_list(opts) do

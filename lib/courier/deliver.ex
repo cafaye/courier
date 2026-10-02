@@ -18,25 +18,45 @@ defmodule Courier.Deliver do
        a mail courier cannot build has now sent something to a person.
     4. **The user wants it.** `:suppressed` — no mail, no event, no record of a
        send that did not happen.
-    5. **The mailbox can receive it.** `{:error, {:suppressed_address, state}}` —
+    5. **They have unsubscribed from this type.** `{:error, {:unsubscribed, type}}`
+       — the recipient pressed the one-click unsubscribe button in a previous
+       message (RFC 8058) and courier recorded it. **Per type, not per address**,
+       which is the whole reason it is a question of its own.
+    6. **The mailbox can receive it.** `{:error, {:suppressed_address, state}}` —
        a hard bounce (RFC 5321 §5.1.1, `:undeliverable`) or a spam complaint
        (RFC 2142 §5, `:suppressed`) recorded by a provider. Also before the
        provider is asked, and also no mail, no event, no record.
-    6. **The message has something in it.** `{:error, :empty_message}` — a
+    7. **The message has something in it.** `{:error, :empty_message}` — a
        rendered message with neither a text nor an HTML body. `Swoosh` would
        accept it and answer a provider-shaped id, so this is the last check before
        the transaction rather than an afterthought inside it.
 
-  Steps 4 and 5 are two different questions and the order is deliberate: "does
+  Steps 4, 5 and 6 are three different questions and the order is deliberate: "does
   this person want this mail?" is asked before "can this mailbox still receive
-  it?", because the user's own answer is the one they can act on. Both stop the
-  send — mailing a dead address costs a sending domain its reputation, and mailing
-  somebody who marked you as spam costs more.
+  it?", because the user's own answer is the one they can act on. Steps 5 and 6
+  are both about the address and are **not** the same question — 5 is about one
+  notification type and 6 is about the mailbox itself, so a person who
+  unsubscribed from product updates still gets their password reset. All three
+  stop the send: mailing a dead address costs a sending domain its reputation, and
+  mailing somebody who unsubscribed or marked you as spam costs more.
 
   What is left is one transaction: the provider is called and the outbox row is
   written. If the provider refuses, the transaction rolls back and there is
   nothing claiming a mail went out; if it accepts, the row is there to be
   published and the caller gets the message id and the event's id.
+
+  ## The one-click unsubscribe, and why it is inside that transaction
+
+  A bulk message carries `List-Unsubscribe` and `List-Unsubscribe-Post` (RFC 8058
+  §3.1) pointing at a token courier mints for that message, and the token is a
+  **row** — so it is written in the same transaction as the send, for the same
+  reason the outbox row is. A send that rolled back must not leave a live
+  unsubscribe credential behind for a message nobody received.
+
+  Which messages carry the headers is not decided here: `Courier.Unsubscribes.
+  decorate_for/3` asks `Courier.Mailers.kind/1`, and all three of courier's types
+  are `:transactional`, so today every message comes back untouched and no token
+  is minted. `Courier.Unsubscribes` is where that is argued.
 
   Nothing here touches NATS. The relay that publishes is
   `Courier.Workers.ProcessOutboxWorker`.
@@ -49,6 +69,7 @@ defmodule Courier.Deliver do
   alias Courier.OutboxEvent
   alias Courier.Repo
   alias Courier.Suppressions
+  alias Courier.Unsubscribes
 
   @doc """
   Sends the `welcome` mail — the payload of the platform's user-created event.
@@ -80,6 +101,7 @@ defmodule Courier.Deliver do
          {:ok, user_id} <- fetch_user_id(payload),
          {:ok, email} <- Mailers.build(type, payload),
          :ok <- fetch_preference(user_id, type),
+         :ok <- fetch_unsubscribed(email, type),
          :ok <- fetch_address(email),
          :ok <- fetch_body(email) do
       send_and_record(type, user_id, email)
@@ -116,6 +138,19 @@ defmodule Courier.Deliver do
   # own answer is the one they can act on — changing an address they no longer
   # want mail at would be a strange remedy to offer.
   #
+  # And **this one is per type while `fetch_address/1` is not**, which is the
+  # whole reason a one-click unsubscribe is a state-less `email_suppressions` row
+  # rather than a stateful one. It asks "has this person asked not to receive
+  # *this* kind of mail at this address", and the answer for `product_update` says
+  # nothing about `password_reset`. See `Courier.Unsubscribes`.
+  defp fetch_unsubscribed(email, type) do
+    if Suppressions.unsubscribed?(recipient(email), type) do
+      {:error, {:unsubscribed, type}}
+    else
+      :ok
+    end
+  end
+
   # It is here rather than in an HTTP controller because a hard-bounced mailbox
   # does not get mail *whatever the caller asked for*, and every caller of this
   # module is a caller of that promise. `Courier.Suppressions` answers
@@ -148,22 +183,42 @@ defmodule Courier.Deliver do
   # happen is a lie the platform will act on. The cost is that courier holds a
   # transaction open across a network call; that is the outbox's price, not a
   # mistake, and a send is one HTTP request.
+  #
+  # **The one-click unsubscribe token is minted in here too, and for the same
+  # reason.** It is a row that exists because of this send, so a send that rolled
+  # back must not leave one behind: a token nobody was ever offered is a live
+  # credential for an unsubscribe, for an address about to be sent mail by somebody
+  # else. `Courier.Unsubscribes.decorate_for/3` is one call and it decides the
+  # whole thing — a transactional type comes back untouched with no row, a bulk one
+  # comes back with the two RFC 8058 headers and a token — so the conditional does
+  # not live in this module and cannot drift from the kind table.
   defp send_and_record(type, user_id, email) do
     message_id = "courier-" <> Ecto.UUID.generate()
 
     case Repo.transaction(fn ->
-           case Mailer.deliver(tag(email, message_id)) do
-             {:ok, _metadata} -> record(type, user_id, message_id, email)
-             {:error, reason} -> Repo.rollback({:provider, reason})
+           case Unsubscribes.decorate_for(type, user_id, email) do
+             {:ok, email} ->
+               case Mailer.deliver(tag(email, message_id)) do
+                 {:ok, _metadata} -> record(type, user_id, message_id, email)
+                 {:error, reason} -> Repo.rollback({:provider, reason})
+               end
+
+             {:error, reason} ->
+               Repo.rollback({:unsubscribe, reason})
            end
          end) do
       {:ok, result} ->
         {:ok, result}
 
-      # The two failures are kept apart on the way out: a provider that said no
-      # is worth retrying, and a row that could not be written is an incident.
+      # The three failures are kept apart on the way out, because a caller acts on
+      # them differently: a provider that said no is worth retrying, a row that
+      # could not be written is an incident, and a token that could not be minted
+      # is neither — nothing was sent, and the identical request is safe to repeat.
       {:error, {:provider, reason}} ->
         {:error, {:delivery_failed, reason}}
+
+      {:error, {:unsubscribe, reason}} ->
+        {:error, {:unsubscribe_failed, reason}}
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:error, {:event_not_recorded, changeset}}

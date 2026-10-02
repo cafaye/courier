@@ -199,7 +199,7 @@ jobs:
             echo "::error::bin/prime exited $status — the gate is red" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "whole suite (bin/prime)" 1212
+          bin/assert-suite "$log" "whole suite (bin/prime)" 1276
       #
       # Remeasured on the tree carrying `config/kamal-backup.yml` and
       # `config/deploy.yml`: whole suite 1156, which is 577 with no database and
@@ -231,30 +231,42 @@ jobs:
       # suite that is not the sum of its own tiers is a suite where a file has been
       # left out of both.
       #
-      # **REMEASURED on the tree carrying the door opener, and the split is the
-      # design rather than an accident.** courier-26 adds 62 tests that split
-      # **46 / 16**:
+      # **REMEASURED on the tree carrying the one-click unsubscribe, and the ONE
+      # NUMBER THAT WENT DOWN is the one worth reading.** courier-24 adds 64 tests
+      # and moves a file between the tiers:
       #
-      #   * the no-database tier grew by 46, from
-      #     `test/courier/principal/introspection/document_test.exs` (17),
-      #     `test/courier/principal/introspection_test.exs` (18) and
-      #     `test/courier/principal/introspection/transport_req_test.exs` (11) —
-      #     three files that touch no `Courier.Repo` and assert the whole of
-      #     `Courier.Principal.Introspection`. That placement is the point: the
-      #     authentication boundary is the one part of this service that must be
-      #     checkable on a runner with NO database, and a resolver whose tests need
-      #     postgres are not checked at all on the machine where the database is the
-      #     thing that is missing. It is the same tier that proves a `mix test` with
-      #     no server executes zero tests is caught.
-      #   * the database tier grew by 16, from
-      #     `test/courier_web/plugs/principal_config_test.exs`, a
-      #     `CourierWeb.ConnCase` because its subject is the RESPONSES: the 401, the
-      #     503, the halt, and `openapi.yaml`'s declaration of the 503 on every
-      #     operation behind the principal plug. A status asserted on the plug
-      #     rather than over a real request is a status no client ever receives, and
-      #     a document-vs-router check needs the router.
+      #   * **the no-database tier went 623 -> 619** and
+      #     `test/courier/telemetry_canary_test.exs` moved out of it.
+      #     `test/courier/telemetry_canary_test.exs` is the redaction boundary's
+      #     proof, and every request it drove was refused before it reached a
+      #     controller that touches a database — which is exactly why a file with
+      #     no sandbox could drive the real router at all.
+      #     `POST /unsubscribe/:token` is the first route in that file whose 404
+      #     depends on a row, so its canary needs a sandbox.
+      #   * **The alternative was refused, and the reasoning is the point**: a canary
+      #     can be planted on a request the `:accepts` plug refuses, and the file
+      #     would have stayed in the no-database tier. That would have kept the
+      #     number and made the tier's own claim — "these tests never touch
+      #     `Courier.Repo`" — quietly false, which is the same defect this tier
+      #     exists to prevent. **A floor is a decrease detector; a tier is a
+      #     statement about what the tests do, and a statement that is only true
+      #     because a request was answered early is a lie with a number on it.**
+      #   * **the database tier grew to 663**, from 21 tests in
+      #     `test/courier/unsubscribes_test.exs` (it writes a row in
+      #     `email_suppressions`), 5 in
+      #     `test/courier/unsubscribe_headers_test.exs` (the negative case is a
+      #     claim about a table with no token rows in it), 19 in
+      #     `test/courier_web/controllers/unsubscribe_controller_test.exs` (real
+      #     HTTP against a route that reads a row), 4 in
+      #     `test/courier/deliver_test.exs`, and 19 in the files that gained tests
+      #     where their claims already lived: the router and the canary.
       #
-      # The previous values here were 1156 (577 + 579) on the tree carrying
+      # **1282 is 619 + 663**, which is the consistency check worth making: a whole
+      # suite that is not the sum of its own tiers is a suite where a file has been
+      # left out of both.
+      #
+      # The previous values here were 1218 (623 + 595) on the tree carrying the door
+      # opener, 1156 (577 + 579) on the tree carrying
       # `config/kamal-backup.yml`, and 1134 (561 + 573) on the tree carrying the
       # inbound provider surface, and before that 1073 (535 + 538), measured on the
       # MERGED tree carrying `Courier.Inbound` and `Courier.Events`, and before that
@@ -267,7 +279,7 @@ jobs:
       # stopped describing the tree. Both were wrong and only one of them would have
       # failed a build.
 
-      - name: tier — no database (623 tests, 28 files)
+      - name: tier — no database (619 tests, 27 files)
         # These files never touch `Courier.Repo`. They are gated on a database
         # anyway, because `mix test` is aliased to `ecto.create` first and aborts
         # before the first test when there is no server — so this tier is the
@@ -280,7 +292,10 @@ jobs:
         # holds no `Repo` and adds no migration, so the redaction boundary can be
         # tested with no database at all. `CourierWeb.ErrorReportingTest` is in
         # the other tier because it stops `Courier.Repo` under the application
-        # supervisor to prove the same thing from the other side.
+        # supervisor to prove the same thing from the other side — and
+        # `test/courier/telemetry_canary_test.exs` joined it, because the
+        # one-click unsubscribe's 404 is the first request in that file that
+        # reaches a repo at all.
         run: |
           set -euo pipefail
           grep -rLE 'use (Courier\.DataCase|CourierWeb\.ConnCase)' test --include='*_test.exs' |
@@ -298,9 +313,9 @@ jobs:
             echo "::error::the no-database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "no database" 623
+          bin/assert-suite "$log" "no database" 619
 
-      - name: tier — database (595 tests, 29 files)
+      - name: tier — database (663 tests, 33 files)
         # Every file here goes through Courier.DataCase / CourierWeb.ConnCase
         # and therefore through the Ecto SQL sandbox: the SQL layer, the
         # migrations `mix ecto.setup` applies, Oban's tables, and the
@@ -324,7 +339,7 @@ jobs:
             echo "::error::the database tier exited $status" >&2
             exit "$status"
           fi
-          bin/assert-suite "$log" "database" 595
+          bin/assert-suite "$log" "database" 663
 
       - name: tier — the SSRF table (62 tests, in-memory resolver)
         # courier-03's table, run on its own so the log carries a line that can
@@ -399,9 +414,9 @@ jobs:
             echo
             echo "| tier | asserted | checked by |"
             echo "|---|---|---|"
-            echo "| whole suite (\`bin/prime\`) | 1218 passed | \`bin/assert-suite\` |"
-            echo "| no database, 28 files | 623 passed | tier step |"
-            echo "| database, 29 files | 595 passed | tier step |"
+            echo "| whole suite (\`bin/prime\`) | 1282 passed | \`bin/assert-suite\` |"
+            echo "| no database, 27 files | 619 passed | tier step |"
+            echo "| database, 33 files | 663 passed | tier step |"
             echo "| SSRF table | 62 passed | tier step |"
             echo "| coverage | ${COVERAGE_FAIL_UNDER}% floor (86.3% measured) | coverage step |"
             echo "| mix.lock | no diff after the gate | lockfile step |"

@@ -33,6 +33,24 @@ defmodule Courier.TelemetryCanaryTest do
   a suite in which courier exported nothing fails loudly instead of passing
   quietly. That guard is the single place this is checked.
 
+  ## This file is a `Courier.DataCase`, and that arrived with the unsubscribe route
+
+  Every request below used to be **refused before it reached a controller that
+  touches a database** — an unauthenticated `PUT`, an anonymous `POST` — which is
+  why a file with no sandbox could drive real requests through the real router.
+  The one-click unsubscribe is the first route here whose answer depends on a row:
+  `POST /unsubscribe/:token` looks the token up and answers 404 for one courier
+  did not issue, so the canary has to reach that read or it is a canary on a
+  request the service never really serves.
+
+  A canary proved on a request the `:accepts` plug refuses would keep this file in
+  the no-database tier, and the tier would be lying: the point of that tier is
+  "these tests never touch `Courier.Repo`", and a claim about the tier that is
+  true only because the request was answered early is the same kind of claim this
+  file exists to disprove. So the file is a `Courier.DataCase`, it is counted in
+  the database tier, and the numbers in `.github/workflows/ci.yml` were re-measured
+  in the commit that moved it.
+
   ## The canary is SHORT, and that is deliberate
 
   A long canary would let a length ceiling be what makes a test pass, and a
@@ -41,7 +59,7 @@ defmodule Courier.TelemetryCanaryTest do
   nothing else.
   """
 
-  use ExUnit.Case, async: false
+  use Courier.DataCase, async: false
 
   import Phoenix.ConnTest
   import Plug.Conn
@@ -92,6 +110,29 @@ defmodule Courier.TelemetryCanaryTest do
       assert response.status in [200, 400, 401, 403, 404, 409]
 
       assert_no_canary()
+    end
+
+    test "a one-click unsubscribe token exports neither, and is a 404 not a span error" do
+      # The sharpest value in this service after a signing secret. The token in
+      # `/unsubscribe/:token` IS the whole authorization for an unauthenticated
+      # `POST` that changes what a person receives, and it travels in a URL — which
+      # is the shape that ends up in a `Location`, a `url.full` attribute or a
+      # server access log. RFC 8058 §3.1 wants it opaque for exactly the reason
+      # that matters here: a leaked one is a live credential.
+      #
+      # The route is parameterised, so the span records the TEMPLATE and the token
+      # cannot ride in — which is the same property the webhook test above asserts,
+      # on the one surface where a concrete path would be worst.
+      for verb <- ["GET", "POST"] do
+        response = request(verb, "/unsubscribe/lu_#{@canary}", %{})
+
+        assert response.status == 404,
+               "#{verb} /unsubscribe answered #{response.status} for a token courier " <>
+                 "never issued. A 401 here would say a credential was refused, and " <>
+                 "there is no credential on this route."
+
+        assert_no_canary()
+      end
     end
 
     test "a webhook endpoint carrying a URL and a signing secret exports neither" do

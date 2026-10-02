@@ -161,7 +161,7 @@ defmodule Courier.Suppressions do
         {:ok, :new, row}
 
       {:error, %{__struct__: Ecto.Changeset} = changeset} ->
-        if duplicate?(changeset), do: duplicate(attrs), else: {:error, changeset}
+        duplicate_or(changeset, attrs)
     end
   end
 
@@ -215,6 +215,107 @@ defmodule Courier.Suppressions do
     _ = other
     {:error, :unsupported_kind}
   end
+
+  @doc """
+  Records a one-click unsubscribe (RFC 8058): the recipient has asked not to
+  receive one notification type at one address.
+
+  This is the **same table, the same unique index and the same answer shapes** as
+  `record/1`, and that is the point: an unsubscribe is a report about an address
+  like any other, so the mechanism for making a retry harmless is the mechanism
+  that already exists. `{:ok, :new, row}` and `{:ok, :duplicate, row}` are the
+  same two answers a redelivered bounce gets, and `Courier.Unsubscribes` counts
+  them the same way.
+
+  **Two differences from a provider report, and both are the absence of a fact
+  rather than a new one:**
+
+    * **`state` is not set.** A bounce and a complaint are facts about the
+      MAILBOX and stop every type courier sends; an unsubscribe is an instruction
+      about one type, and this table is consulted for a password reset as firmly
+      as for a newsletter. So the row carries no state, which makes it invisible
+      to `state/1` and `find/1` — the fold already ignores rows with no state, and
+      that is how a soft bounce records nothing — and visible to
+      `unsubscribed?/2`. See `Courier.Unsubscribes` for the whole argument, and
+      `Courier.Suppression.unsubscribe_changeset/2` for the one line that differs.
+    * **`provider` is courier's own name for the surface.** `"unsubscribe"`, beside
+      `"resend"`, in the half of the unique index every other reader of this table
+      already groups by. An operator asking "why is this address not getting
+      product updates" gets a row that says who wrote it and why in `reason`.
+
+  `provider_event_id` is the unsubscribe token's id, which is what makes a second
+  `POST` a `:duplicate` rather than a second row.
+  """
+  @spec unsubscribe(map()) ::
+          {:ok, :new | :duplicate, Suppression.t()} | {:error, Ecto.Changeset.t()}
+  def unsubscribe(attrs) when is_map(attrs) do
+    %Suppression{}
+    |> Suppression.unsubscribe_changeset(attrs)
+    |> Repo.insert()
+    |> case do
+      {:ok, row} -> {:ok, :new, row}
+      {:error, %{__struct__: Ecto.Changeset} = changeset} -> duplicate_or(changeset, attrs)
+    end
+  end
+
+  @doc """
+  Whether `email` has asked not to receive `notification_type`.
+
+  The send path's question, and it is asked per type on purpose: the answer for
+  one type says nothing about any other, which is the property that keeps an
+  unsubscribe from stopping a password reset.
+
+  **A row with no `notification_type` never matches**, whatever the address is, so
+  this cannot be reached by a bounce or a complaint even if a caller passed a type
+  — a hard bounce stops the send two questions earlier, in `state/1`.
+  """
+  @spec unsubscribed?(String.t() | nil, String.t()) :: boolean()
+  def unsubscribed?(email, notification_type)
+      when is_binary(email) and is_binary(notification_type) do
+    Suppression
+    |> where([s], s.email == ^normalize(email))
+    |> where([s], s.notification_type == ^notification_type)
+    |> where([s], is_nil(s.state))
+    |> limit(1)
+    |> Repo.exists?()
+  end
+
+  def unsubscribed?(_email, _notification_type), do: false
+
+  @doc """
+  The row courier already holds for this `(provider, provider_event_id)`, or `nil`.
+
+  ## Why this lookup exists at all, and it is a workaround
+
+  It is here so that a caller who needs the row AND an event to be atomic can ask
+  before it inserts. `record/1` and `unsubscribe/1` find a duplicate by inserting
+  and catching the unique violation, then reading the winning row back — which is
+  correct and is the right shape, but it only works **outside** a transaction.
+  PostgreSQL aborts a whole transaction on a statement error, so the read that
+  follows the failed insert answers `25P02 current transaction is aborted`:
+
+      # outside a transaction
+      Suppressions.unsubscribe(attrs)  #=> {:ok, :new, row}  then  {:ok, :duplicate, row}
+
+      # inside Repo.transaction/1
+      Suppressions.unsubscribe(attrs)  #=> ** (Postgrex.Error) 25P02
+
+  So the lookup can only ever be *wrong* in the direction of thinking a report is
+  new, and the insert that follows then loses the index and the caller rolls the
+  whole transaction back. The index is still the arbiter. `Courier.InboundReports`
+  has measured all of this at length; this is its one function, extracted so the
+  unsubscribe path is the same path rather than a second copy of it.
+  """
+  @spec find_by_event(String.t() | nil, String.t() | nil) :: Suppression.t() | nil
+  def find_by_event(provider, provider_event_id)
+      when is_binary(provider) and is_binary(provider_event_id) do
+    Suppression
+    |> where([s], s.provider == ^provider and s.provider_event_id == ^provider_event_id)
+    |> limit(1)
+    |> Repo.one()
+  end
+
+  def find_by_event(_provider, _provider_event_id), do: nil
 
   @doc "Whether courier will refuse to write to `email`."
   @spec suppressed?(String.t() | nil) :: boolean()
@@ -302,5 +403,14 @@ defmodule Courier.Suppressions do
         to_string(Keyword.get(opts, :constraint_name)) ==
           "email_suppressions_provider_idempotency_index"
     end)
+  end
+
+  # `record/1` and `unsubscribe/1` share the tail, because they share the
+  # mechanism: the same index, matched by the same name, answering the same two
+  # shapes. One function rather than two copies of five lines is what makes "a
+  # second `POST` is a `:duplicate`" a property of the table rather than of one
+  # call site.
+  defp duplicate_or(changeset, attrs) do
+    if duplicate?(changeset), do: duplicate(attrs), else: {:error, changeset}
   end
 end

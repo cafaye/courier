@@ -56,6 +56,11 @@ defmodule Courier.BackupTablesTest do
     "oban_jobs" => "the outbox relay's queue: work accepted and not yet done",
     "outbox_events" =>
       "every CloudEvents envelope courier published, and the relay's own claim query",
+    "unsubscribe_tokens" =>
+      "one row per RFC 8058 one-click link courier minted — a SHA-256 of the token, " <>
+        "the user, the notification type and the address it was minted for. Never the " <>
+        "token itself, which is why a dump of this table is not a list of mailboxes " <>
+        "anybody can unsubscribe",
     "webhook_deliveries" =>
       "the attempt log for each endpoint, including its retry budget's state",
     "webhook_endpoints" => "a tenant's URL and its SEALED signing secret"
