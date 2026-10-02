@@ -27,15 +27,26 @@ defmodule Courier.TestSupport.FailingSink do
 
   # Tell the test the sink was reached. The relay's counters are in ETS, so a
   # test can poll them — and polling is what made this file flaky, because two
-  # hundred `:sys.get_state/1` calls complete in well under a millisecond and a
-  # drain task scheduled behind them may not have run at all. The test then
-  # failed roughly one run in three depending on the seed.
+  # hundred `:sys.get_state/1` calls are a *count* rather than a duration and so
+  # race whatever the drain happens to take.
   #
   # `assert_receive` is the primitive the house rules name for waiting, it cannot
   # pass by accident, and it makes the assertion *stronger*: the counter going up
   # proves the accounting, this message proves the sink was actually called, and
   # a relay that counted a failure it never had would fail the second and pass
   # the first.
+  #
+  # **This message is sent on the way IN, and that is load-bearing.** It cannot be
+  # the barrier for `sink_failures`, which the sender writes after this function
+  # has *returned*: measured on a machine at load average 30 across 8 cores, that
+  # write lands anywhere from 0.4 ms to 36 ms after this `send`, depending on
+  # nothing the code does. So `error_relay_test.exs` waits for the drain **process
+  # to exit** instead — see `await_drain/1` there — and this message's job is only
+  # to prove the sink was reached at all.
+  #
+  # Recorded because the note this replaced claimed the flake had been fixed by
+  # `assert_receive` alone. It had not been: the counter read was still a spin, and
+  # the file still failed about one run in three.
   defp notify(opts) do
     case Keyword.get(opts, :sink_target) do
       pid when is_pid(pid) -> send(pid, {:sink_attempted, mode(opts)})

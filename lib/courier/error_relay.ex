@@ -403,6 +403,15 @@ defmodule Courier.ErrorRelay do
   @doc false
   def sender_name(name), do: :"#{name}.sender"
 
+  # The `Task.Supervisor` the sender runs its drains under, which is where the
+  # name `#{inspect(__MODULE__)}.Sender.init/1` builds it. It is exposed beside
+  # `sender_name/1` rather than re-derived in a test because a test that spells
+  # the string out would keep passing if the sender ever moved: the name would
+  # stop matching anything, `which_children/1` would answer `[]`, and a wait that
+  # silently waits for nothing looks exactly like a wait that found nothing to do.
+  @doc false
+  def tasks_name(name), do: :"#{sender_name(name)}.tasks"
+
   @doc false
   def count_stat(name, key, by) do
     :ets.update_counter(stats_table(name), {:stat, key}, {2, by}, {{:stat, key}, 0})
