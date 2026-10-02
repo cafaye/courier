@@ -377,13 +377,91 @@ report carries a `Message-ID` and a recipient, never a user, and an event with a
 `Message-ID` names no send courier made records its suppression and publishes no
 event, with a log line: the row is the load-bearing half.
 
+## Unsubscribing
+
+Gmail and Yahoo's bulk-sender requirements, in force since June 2024, are about
+[RFC 8058](https://www.rfc-editor.org/rfc/rfc8058): a bulk message carries a
+`List-Unsubscribe` header whose HTTPS URI a mail client `POST`s to on the
+recipient's behalf, with no session and no confirmation page. A sender without one
+lands in spam.
+
+courier's gate for it is `Courier.Mailers.kinds/0` and `Courier.Unsubscribes`, and
+there is **no new environment variable** — the URL is built from
+`CourierWeb.Endpoint.url/0`, which `PHX_HOST` already turns into
+`https://$PHX_HOST` in production. That matters, because §3.1 requires the header
+to carry an **HTTPS** URI, and it is now the same setting that produces every
+other URL courier generates. `test/courier/unsubscribes_test.exs` reads that
+requirement out of production's own configuration rather than out of a comment.
+
+**All three of courier's notification types are transactional, so nothing courier
+sends today carries the header** — a password reset with an unsubscribe link is
+its own defect. The kind table is where that decision lives, it is closed over the
+types courier can send, and its default is `:transactional` so a new type nobody
+classified cannot grow a link by omission. Adding courier's first bulk type is
+**one row in that table plus one enum value in core's payload schemas**, not one
+line here: every payload courier publishes carries `notification_type`, and
+`core/schemas/events/courier/email/*.schema.json` freezes that field to the three
+names courier sends.
+
+The endpoint, `POST` and `GET /unsubscribe/{token}`, is outside `/v1` and behind no
+authentication plug, which is not an oversight:
+
+- **§3.1 forbids the request from carrying authorization at all** — "The POST
+  request MUST NOT include cookies, HTTP authorization, or any other context
+  information." A mail client holds no bearer token, so behind
+  `CourierWeb.Plugs.Principal` every one-click unsubscribe in the world would be a
+  `401`.
+- **The token in the path is the whole of the authorization**: 32 bytes of
+  `:crypto.strong_rand_bytes/1`, stored only as a SHA-256 and never as itself, so a
+  database dump is not a list of mailboxes anybody can unsubscribe. A token courier
+  did not issue is a **404** — it is a resource's address, not a refused
+  credential.
+- **It never redirects.** "The mail sender MUST NOT return an HTTPS redirect, since
+  redirected POST actions have historically not worked reliably." The success is
+  the answer.
+- **A retry is the same 200**, and the deduplication is `email_suppressions`' own
+  unique index on `(provider, provider_event_id)` with the token's id as the key —
+  so a client that timed out gets the first answer back rather than an error.
+
+What an unsubscribe records is a row in `email_suppressions` with
+`provider: "unsubscribe"`, the address, the notification type, the user, and **no
+`state`**. The absent state is the whole mechanism: a bounce and a complaint are
+facts about the *mailbox* and refuse every type courier sends, and
+`Courier.Deliver` consults that table for a password reset as firmly as for a
+newsletter — so a stateful unsubscribe row would be a person who stops receiving
+product updates and then cannot reset their password. A `nil` state is a case
+`Courier.Suppressions.state/1` has always folded to "nothing" and never had a row
+for. It publishes `courier.notification.suppressed` with
+`reason: "preference_off"` in the same transaction.
+
+**What it costs, stated rather than discovered:** the row is immutable, as every
+row in that table is, and no route clears one — so a recipient who unsubscribes in
+error has to be reached at another address. The alternative measured worse: the
+preferences table records *which account* is entitled to a user's answers, an
+unsubscribe has no principal, and writing the sending account there is a tenancy
+claim made for a user id the caller chose. A route that clears an unsubscribe
+belongs with the first bulk type, and deliberately does not arrive in the same
+commit as the thing it would undo.
+
+**What courier cannot do for you:** §4 requires a valid DKIM signature covering
+both headers and listed in the `h=` tag, and §3.2 says a receiver that finds none
+"SHOULD NOT offer a one-click unsubscribe for that message". courier submits
+through SMTP to a relay and holds no private key for the sending domain, so the
+signing is the relay's — the same place SPF, DMARC and everything else about the
+domain lives. If the relay does not sign, the header is on the wire and the mail
+client ignores it.
+
 ## Not here yet
 
-`courier.notification.suppressed` has a builder and no caller: a send courier
-refused writes no outbox row, because `Courier.Deliver`'s moduledoc promises "no
-mail, no event, no record of a send that did not happen", and that promise is
-`Courier.Events`' to argue with rather than to override. `courier.email.queued`
-has no builder because courier has no queue — the send path is synchronous and
-that type exists to make a *backlog* visible.
+`courier.notification.suppressed` still has no caller for a **refused send**:
+`{:error, :suppressed}` and `{:error, {:suppressed_address, _}}` out of
+`Courier.Deliver` happen today and `POST /v1/messages` already answers them, but
+`Courier.Deliver`'s moduledoc promises "no mail, no event, no record of a send
+that did not happen" and that promise is `Courier.Events`' to argue with rather
+than to override. (The one-click unsubscribe **does** publish the type, because a
+person pressing the button is a standing answer that changed rather than a send
+courier turned down.) `courier.email.queued` has no builder because courier has no
+queue — the send path is synchronous and that type exists to make a *backlog*
+visible.
 
 Conventions live in [AGENTS.md](AGENTS.md).

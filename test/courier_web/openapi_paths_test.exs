@@ -790,18 +790,24 @@ defmodule CourierWeb.OpenAPIPathsTest do
       # is caught here rather than as a baffling failure in the check built on it.
       responses = Paths.document_responses!()
 
-      # 10 operations, and the number is here to be changed in the commit that adds
+      # 12 operations, and the number is here to be changed in the commit that adds
       # or removes one rather than to be discovered by the count assertion below
       # firing on an unrelated edit. It is a tripwire, not the assertion: the check
       # that matters is the loop underneath, which asks every non-2xx whether it is
       # wired to courier's envelope.
       #
       # 9 → 10 with `POST /inbound/resend`, the provider webhook courier receives
-      # signed reports on. It is counted here for the same reason every other
-      # operation is: a document that quietly stops describing an operation is the
-      # failure `CourierWeb.OpenAPIDocumentTest` exists to catch, and this file is
-      # the reader that would stop understanding the document first.
-      assert map_size(responses) == 10
+      # signed reports on. 10 → 12 with `GET` and `POST /unsubscribe/{token}`, the
+      # RFC 8058 one-click endpoint every bulk message's `List-Unsubscribe` header
+      # points at. **Two operations on one path, which is why this moved by two and
+      # not by one** — RFC 8058 §3.2 has the mail client POST to the same URI a
+      # person GETs, and a bulk sender whose header points at a `405` has not met
+      # the requirement by the clients people actually use. They are counted here
+      # for the same reason every other operation is: a document that quietly stops
+      # describing an operation is the failure `CourierWeb.OpenAPIDocumentTest`
+      # exists to catch, and this file is the reader that would stop understanding
+      # the document first.
+      assert map_size(responses) == 12
 
       for {_operation, declared} <- responses, {status, response} <- declared do
         if not String.starts_with?(status, "2") do

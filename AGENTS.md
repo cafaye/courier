@@ -25,7 +25,8 @@ lib/courier/mailer.ex                 the Swoosh mailer: the adapter is config
 lib/courier/mailer_adapter.ex         the provider adapter, read from the
                                       environment, and the refusal that stops
                                       courier booting into a silent one
-lib/courier/mailers.ex                compose the three transactional emails
+lib/courier/mailers.ex                compose the three transactional emails, and
+                                      say which of them may be unsubscribed from
 lib/courier/mailers/templates/        the bodies, compiled at build time
 lib/courier/deliver.ex                the send: preference, provider, outbox row
 lib/courier/events.ex                 the CloudEvents envelope and the catalog
@@ -37,6 +38,9 @@ lib/courier/inbound.ex                the behaviour: verify, then parse, then
 lib/courier/inbound/signature.ex       the CONSUMER's half of the Standard Webhooks
                                       scheme: is this POST really the provider?
 lib/courier/inbound/resend.ex         Resend's reports in courier's vocabulary
+lib/courier/unsubscribes.ex          RFC 8058: the two headers, and the door they
+                                      open
+lib/courier/unsubscribe_token.ex      the one-click credential, stored as a digest
 lib/courier/nats_publisher.ex         the behaviour the relay publishes through
 lib/courier/nats_publisher/noop.ex    the stand-in that hands envelopes back
 lib/courier/observability.ex          the span-attribute ALLOWLIST, and the one
@@ -172,6 +176,13 @@ test/courier/inbound/                 the verified-inbound base: a provider's ow
 test/courier/inbound/resend_test.exs   Resend's payloads verbatim, and the mapping
 test/courier/inbound/signature_test.exs  svix's own published vector, and every
                                       way a request is not authentic
+test/courier/unsubscribes_test.exs    the one-click gate as a library: the digest,
+                                      the state-less row, the transaction
+test/courier/unsubscribe_headers_test.exs  THE HEADERS, on real message bytes and
+                                      on a real SMTP socket
+test/courier_web/controllers/unsubscribe_controller_test.exs  the door, over real
+                                      requests: RFC 8058's own POST, the replay,
+                                      the 404, and the refusal afterwards
 test/courier/inbound_test.exs         THE PROOF: the whole inbound path against a
                                       real email_suppressions table, so "an unsigned
                                       payload records nothing" is a claim about rows
@@ -671,6 +682,148 @@ is the one claim no behavioural test can catch** — mutating `hash_equals` to `
 left the suite at 108/108 green — so it is asserted on the source, and the test
 says why a timing test would be worse than useless.
 
+**Whether a message may be unsubscribed from is the KIND, and the kind is a closed
+table in `Courier.Mailers` — not a request field, not configuration, and not a
+caller's guess.** `Courier.Mailers.kinds/0` maps every type courier can send to
+`:transactional` or `:bulk`, `Courier.Deliver` calls exactly one function
+(`Courier.Unsubscribes.decorate_for/3`), and that function is where the
+conditional lives so it cannot drift from the table. Two rules that look like
+details:
+
+  * **The default for an unclassified type is `:transactional`,** and the
+    direction is the whole decision. A new type nobody classified would otherwise
+    grow an unsubscribe link, and an account-management email with one is its own
+    defect — the remedy courier could offer a person who reset their password and
+    found a link is a support ticket. Failing towards "no header" is the direction
+    a person notices.
+  * **The table is a LIST OF PAIRS, not a map, and the reason is the compiler.**
+    Every value in it is `:transactional` today, so a map literal infers
+    `%{String.t() => :transactional}` and the type checker then correctly reports
+    that an arm matching `:bulk` can never run — right about the literal, wrong
+    about the code, and `--warnings-as-errors` turns it into a red build. The
+    "simplification" back to a map is invisible in a diff, which is why the
+    comment on the table says so.
+
+**An unsubscribe is recorded as a `email_suppressions` row with NO `state`, and
+the absent state is the mechanism rather than a detail.** A bounce and a complaint
+carry a state and refuse **every** type courier sends, because they are facts
+about the MAILBOX, and `Courier.Deliver` consults that table for a password reset
+exactly as firmly as for a newsletter. A stateful unsubscribe row would be a
+person who stops receiving product updates and then cannot reset their password.
+So `Courier.Suppression.unsubscribe_changeset/2` is a **separate changeset** that
+never casts `state` at all, `state` became nullable in the database, and
+`Courier.Suppressions.unsubscribed?/2` reads those rows by `(email,
+notification_type)`. Three consequences worth knowing:
+
+  * **`state/1` has always had that case.** Its own moduledoc spells the fold out
+    as "rows, none carrying a state -> `nil`", and the middle line was unreachable
+    while the column was `NOT NULL`, because the only state-less writer was a soft
+    bounce and it records no row. The migration is what makes the documented fold
+    true, and `suppressed?/1` and `find/1` already filtered on it.
+  * **The two-value vocabulary is not weakened.** `state` is still an `Ecto.Enum` of
+    two values with no database CHECK, and a `NOT NULL` is not what the original
+    migration argued for — it argued that there is no third "suppressed: true"
+    boolean. `nil` is not a third value; it is the absence of one.
+  * **The alternative measured worse, and the measurement is the reason this
+    repository does not write a `notification_preferences` row.** That table
+    records `account_id NOT NULL` — which account is *entitled* to a user's
+    answers — and an unsubscribe has no principal, so the row would have to carry
+    the account that SENT the mail, which is a tenancy claim made for a user id an
+    authenticated caller chose. The cost is a route that works today breaking: the
+    wrong account claims the user, and the account that actually owns them gets a
+    404 from a settings endpoint that worked yesterday. Writing the answer where
+    the table has no tenancy column makes the worst case "this person stops
+    getting one kind of mail".
+
+**The one-click token is stored as a SHA-256 and never as itself, and the plaintext
+exists in exactly two places: the `List-Unsubscribe` header and the recipient's
+mail client.** `Courier.UnsubscribeToken` is the opposite of `Courier.SecretBox`
+and the difference is the direction of the operation: a webhook signing secret has
+to be read *back* to sign with, and an unsubscribe token never does anything but be
+looked up. So a database dump is not a list of mailboxes anybody can unsubscribe —
+`test/courier/unsubscribes_test.exs` reads the column as raw SQL for that reason
+and asserts the digest does not *contain* the token, not merely that it differs.
+RFC 8058 §3.1 asks for "an opaque identifier or another hard-to-forge component"
+and §6 says why in the plainest terms in the RFC: a malicious mailer could
+otherwise cause unsubscriptions "as a side effect of users reporting the spam".
+
+**The token in the path is the whole of the authorization, an unknown one is a
+404, and the POST is never redirected.** Three rules, each from a MUST in RFC 8058
+rather than from taste:
+
+  * **§3.1: "The POST request MUST NOT include cookies, HTTP authorization, or any
+    other context information."** A mail client holds no bearer token and is
+    forbidden from sending one, so `POST /unsubscribe/{token}` is outside `/v1`
+    and behind no auth plug — behind `CourierWeb.Plugs.Principal` every
+    one-click unsubscribe in the world would be a 401. The same paragraph asks
+    for a hard-to-forge URI, and the token is the answer.
+  * **A token courier did not issue is a 404, not a 401.** It is the *address* of a
+    resource rather than a credential presented at a door, and it covers a token
+    of the wrong shape and one that is not a string as well — one answer, so the
+    endpoint is not an oracle that can be used to test tokens. `openapi.yaml`
+    declares no 401 for either verb, and `openapi_error_responses_test.exs`
+    provokes every status the route can send against the document.
+  * **§3.1: "The mail sender MUST NOT return an HTTPS redirect."** A redirect is
+    the one thing here that would work for a browser and silently break the mail
+    client that matters, so the test asserts the **absence** of a `Location`
+    header.
+
+**The token is read from `conn.path_params` and never from `params`,** and that is
+a decision rather than tidiness: `Plug.Parsers` merges the request body into
+`conn.params`, so a one-click `POST` whose body carried its own `token` could name
+a different mailbox than the path did — and the path is the whole of this route's
+authority. The test sends exactly that request, with two real tokens, and asserts
+the path won.
+
+**A replay is the same 200, and the deduplication is the index that was already
+there.** The unique `(provider, provider_event_id)` constraint answers a second
+`POST` with `:duplicate`, keyed on the token's id, and the event is published only
+on the new row — so a mail client that timed out gets the first answer back rather
+than an error. There is no `Idempotency-Key` for the two reasons
+`POST /inbound/resend` has none: the header is scoped to a principal, and RFC 8058
+forbids this request from carrying authorization at all.
+
+**And courier sends no bulk mail, so the positive branch of the send path is
+unreachable today — and the reason is in core, not here.** All three types are
+`:transactional`, and adding a fourth is a change in `cafaye/core`: every payload
+courier publishes carries `notification_type`, and
+`core/schemas/events/courier/email/*.schema.json` freezes that field to an enum of
+the three names courier sends. The switch is one row in `kinds/0` **plus** one enum
+value in core, and the table's test — that its keys are `types/0` — is what makes
+that a decision rather than a drift. `test/courier/unsubscribe_headers_test.exs`
+says which half of the gate is therefore proved where, rather than leaving a
+reader to assume both.
+
+**The one-click endpoint is the only route whose answer depends on a row and a
+rejected credential, and the canary test moved tiers because of it.**
+`test/courier/telemetry_canary_test.exs` drives real requests through the real
+router with no sandbox, because every request it drove was refused before it
+reached a controller that touches a database. A canary could be planted on a
+request the `:accepts` plug refuses and the file would have stayed in the
+no-database tier — and the tier's own claim ("these tests never touch
+`Courier.Repo`") would have quietly become false. **A floor is a decrease detector;
+a tier is a statement about what the tests do**, and a statement that holds only
+because a request was answered early is a lie with a number on it. The file became
+a `Courier.DataCase` and the floors in `.github/workflows/ci.yml` were re-measured
+in the same commit, which is the only one of those two numbers that went **down**.
+
+**That file has a pre-existing race this packet reproduced rather than chased, and
+the record of it belongs here.** `request_spans/0` reads *every*
+`courier.web.request` span in a table shared by the whole VM, filtered only by
+name, and the "a 404 produced a span with a route" assertion is a loop over that
+whole table. So a span from a concurrently finishing `async: true` test in another
+file is read as this file's. Measured on this tree: **1 failure in 8 whole-suite
+`bin/prime` runs, 0 in 12 isolated runs of the file.** The failing assertion
+predates this packet and runs against spans this packet does not produce; what
+this packet did was add one request to the file, which does not make an existing
+race reachable and is stated in `REPORT-courier-24-unsubscribe.md` so the next
+reader counting runs knows it. The two available fixes are both worse: filtering
+`request_spans/0` more narrowly would weaken the presence assertion every other
+test in the file depends on — the "a check over nothing passes" failure the
+file's own moduledoc is built against — and moving the new canary out of the file
+would stop proving that a one-click token, the sharpest value in this service
+after a signing secret, reaches no span.
+
 **A provider payload written from memory is indistinguishable from a correct one
 until the provider's real bytes arrive**, and by then it is in production rows.
 Every payload in `resend_test.exs` is copied from a named
@@ -1008,6 +1161,18 @@ does not start, which is the point — it is the cheapest possible way to find o
 and it happens before the first customer mail rather than after a support ticket.
 
 For templates, without a relay: `COURIER_MAIL_ADAPTER=none mix phx.server`.
+
+**And one the one-click unsubscribe deliberately did not add.**
+`COURIER_PUBLIC_URL` is the name you would reach for first, and it is not here: RFC
+8058 §3.1 requires the `List-Unsubscribe` header to carry an **HTTPS** URI, and
+courier already has exactly one setting that says what its public URL is —
+`PHX_HOST`, which `config/runtime.exs` turns into
+`url: [host: host, port: 443, scheme: "https"]`. `Courier.Unsubscribes.base_url/0`
+builds the header from that, so there is no second variable that can be right for
+the endpoint and wrong for the header, and nothing new an operator can forget.
+`test/courier/unsubscribes_test.exs` reads the scheme out of production's own
+configuration — evaluating `config/runtime.exs` as a boot, with the variables a boot
+needs — so the requirement is measured rather than asserted about a comment.
 
 ## Toolchain
 

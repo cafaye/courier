@@ -31,14 +31,14 @@ defmodule CourierWeb.MessagesController do
 
   ## The status a caller can act on
 
-  Three refusals, distinguishable by status and `code` alone, because a client
+  Four refusals, distinguishable by status and `code` alone, because a client
   branches on those and not on `detail`:
 
   | outcome | status | `code` | retry? |
   | --- | --- | --- | --- |
   | accepted for delivery | 200 | — | — |
   | the recipient's mailbox is suppressed | 409 | `conflict` | **no** |
-  | the request is wrong, or the user declined this type | 422 | `validation_failed` | after fixing it |
+  | the request is wrong, the user declined this type, or they unsubscribed from it | 422 | `validation_failed` | after fixing it |
   | the provider refused, or courier cannot deliver | 503 | `unavailable` | yes, same key |
 
   **The suppression refusal is a 409 and not a 422**, and the argument is that it
@@ -133,11 +133,17 @@ defmodule CourierWeb.MessagesController do
       {:error, :suppressed} ->
         declined(conn)
 
+      {:error, {:unsubscribed, _type}} ->
+        unsubscribed(conn)
+
       {:error, {:suppressed_address, state}} ->
         suppressed(conn, state)
 
       {:error, {:delivery_failed, reason}} ->
         provider_refused(conn, reason)
+
+      {:error, {:unsubscribe_failed, reason}} ->
+        unsubscribe_failed(conn, reason)
 
       {:error, {:event_not_recorded, detail}} ->
         not_recorded(conn, detail)
@@ -260,6 +266,32 @@ defmodule CourierWeb.MessagesController do
     )
   end
 
+  # A 422, and its own `code` so a machine can tell it from a declined
+  # **preference** — the two are the same status on purpose and different facts,
+  # and a caller that cannot tell them apart cannot tell whether the remedy is a
+  # `PUT /v1/notification_preferences/{user_id}` (which reverses it) or nothing at
+  # all (which it does not).
+  #
+  # The remedy this one names honestly: there is no surface that puts a one-click
+  # unsubscribe back. `email_suppressions` is immutable by design and this row is
+  # one of them, and the detail says so rather than pointing a caller at a `PUT`
+  # that would not help. See `Courier.Unsubscribes` for why the answer lives in
+  # that table rather than in the preferences one.
+  #
+  # **No address in the response**, for the reason the 409 below gives: this is a
+  # fact about somebody's mailbox and the table has no `account_id` to scope it.
+  defp unsubscribed(conn) do
+    Problem.send(
+      conn,
+      422,
+      :validation_failed,
+      "The recipient unsubscribed from this notification type with the one-click " <>
+        "unsubscribe link in an earlier message. courier does not send it again, and " <>
+        "there is no API that puts it back.",
+      [%{"field" => "type", "code" => "unsubscribed"}]
+    )
+  end
+
   # The two states, in words, because an operator's response to each is different:
   # a pile of `undeliverable` is list hygiene, a pile of `complained` is a content
   # and sender-reputation problem. No state code in the envelope, because
@@ -298,6 +330,32 @@ defmodule CourierWeb.MessagesController do
       :unavailable,
       "The mail provider did not accept the message. Nothing was sent and nothing " <>
         "was recorded, so this request is safe to retry with the same Idempotency-Key."
+    )
+  end
+
+  # A bulk message whose one-click unsubscribe token could not be minted. The
+  # transaction unwound with the provider never dialled, so nothing was sent and
+  # nothing was recorded — which makes this a 503 and a retryable one, on exactly
+  # the reasoning the provider's own refusal gets. It is a distinct clause rather
+  # than a branch of `provider_refused/2` because the operator's question is
+  # different: nothing left the building, and the fault is a row courier could not
+  # write rather than a relay that said no.
+  #
+  # Unreachable today — every type courier sends is transactional, so no token is
+  # ever minted — and it is here because the alternative is a `WithClauseError` on
+  # the first bulk type, which is a crash on the send path rather than a refusal.
+  defp unsubscribe_failed(conn, reason) do
+    Logger.error(
+      "message send refused: the one-click unsubscribe token could not be minted: " <>
+        inspect(reason)
+    )
+
+    Problem.send(
+      conn,
+      503,
+      :unavailable,
+      "courier could not prepare this message's unsubscribe token, so nothing was sent " <>
+        "and nothing was recorded. This request is safe to retry."
     )
   end
 

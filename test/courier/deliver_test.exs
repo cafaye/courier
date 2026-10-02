@@ -18,9 +18,15 @@ defmodule Courier.DeliverTest do
   alias Courier.Deliver
   alias Courier.NotificationPreferences
   alias Courier.OutboxEvent
+  alias Courier.Unsubscribes
 
   @user_id "6f5d4c3b-2a19-4e8f-9c07-1b2d3e4f5061"
   @other_user_id "7a6e5d4c-3b20-4f90-8d18-2c3e4f506172"
+
+  # The address the unsubscribe tests use. A per-file constant and not a shared
+  # one: `email_suppressions` has no `account_id` and its rows are permanent, so an
+  # address another test also unsubscribed would decide this one's outcome.
+  @email "unsubscribe-deliver@example.com"
 
   # A tenancy key, not a credential and not a secret: the account a stored
   # preference belongs to. The delivery payload carries no account, and that is
@@ -44,6 +50,14 @@ defmodule Courier.DeliverTest do
   # order the database hands rows back in, so nothing here may depend on the
   # second one.
   defp outbox, do: Repo.all(OutboxEvent)
+
+  # The rows that record a SEND. Separate from `outbox/0` because the one-click
+  # unsubscribe announces itself — it writes a `courier.notification.suppressed`
+  # row of its own — and the claim under test is "no send was recorded", not "the
+  # outbox is empty". A test asserting the second would be asserting something
+  # false, and fixing it by clearing the table would be asserting something else.
+  defp sends,
+    do: Repo.all(from event in OutboxEvent, where: event.type == ^Courier.Events.delivered_type())
 
   describe "welcome" do
     test "sends the mail" do
@@ -184,7 +198,9 @@ defmodule Courier.DeliverTest do
 
     test "another type still goes out" do
       assert {:ok, _result} =
-               Deliver.password_reset(payload(%{url: "https://cafaye.com/reset?t=1"}))
+               Deliver.password_reset(
+                 payload(%{email: @email, url: "https://cafaye.com/reset?t=1"})
+               )
 
       assert_email_sent(subject: "Reset your caFaye password")
       assert [%{type: "courier.email.delivered"}] = outbox()
@@ -194,6 +210,65 @@ defmodule Courier.DeliverTest do
       assert {:ok, _result} = Deliver.welcome(payload(%{user_id: @other_user_id}))
 
       assert [%{data: %{"user_id" => @other_user_id}}] = outbox()
+    end
+  end
+
+  describe "a one-click unsubscribe" do
+    setup do
+      # Minted through the real endpoint's own path — `issue/3`, then
+      # `unsubscribe/1` — rather than by writing a row, so what is set up here is
+      # exactly what a `POST` from a mail client would leave behind.
+      {:ok, token} = Unsubscribes.issue(@user_id, "welcome", @email)
+      {:ok, :recorded} = Unsubscribes.unsubscribe(token)
+      :ok
+    end
+
+    test "a type they unsubscribed from sends no mail" do
+      assert {:error, {:unsubscribed, "welcome"}} = Deliver.welcome(payload(%{email: @email}))
+
+      refute_received {:email, _email}
+    end
+
+    test "a type they unsubscribed from records no event" do
+      assert {:error, {:unsubscribed, "welcome"}} = Deliver.welcome(payload(%{email: @email}))
+
+      assert sends() == []
+    end
+
+    test "another type still goes out, and that is the whole point of the row" do
+      # A one-click unsubscribe is an instruction about ONE type, so it is recorded
+      # as an `email_suppressions` row with **no state** — a stateful row there is
+      # read by the address-level check and would stop a password reset as well.
+      assert {:ok, _result} =
+               Deliver.password_reset(
+                 payload(%{email: @email, url: "https://cafaye.com/reset?t=1"})
+               )
+
+      assert_email_sent(subject: "Reset your caFaye password")
+      assert [%{type: "courier.email.delivered"}] = sends()
+    end
+
+    test "and it is a different refusal from a declined preference" do
+      # Two facts about the same person with two different remedies, and a caller
+      # that cannot tell them apart cannot act: one is a `PUT` away from being sent
+      # again and the other is not. `Courier.UnsubscribesTest` proves the row is
+      # state-less; this proves the send path names them differently.
+      assert {:error, {:unsubscribed, "welcome"}} = Deliver.welcome(payload(%{email: @email}))
+
+      {:ok, _} =
+        NotificationPreferences.update(@account_id, @user_id, %{
+          "preferences" => [%{"notification_type" => "team_invitation", "email_enabled" => false}]
+        })
+
+      assert {:error, :suppressed} =
+               Deliver.team_invitation(
+                 payload(%{
+                   email: @email,
+                   url: "https://cafaye.com/join",
+                   account_name: "Acme",
+                   invited_by: "Kaka"
+                 })
+               )
     end
   end
 

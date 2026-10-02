@@ -16,6 +16,47 @@ defmodule Courier.Suppression do
   operator asks courier why an address is suppressed the useful answer is the
   provider's sentence and not courier's enum.
 
+  ## `state` may be absent, and that is not a third value
+
+  The column is `NOT NULL` in the database for every row a **provider** produces,
+  and `create_email_suppressions` argues for it at length: "a hard bounce marks the
+  address `undeliverable`, a complaint marks it `suppressed`, and there is no third
+  'suppressed: true' boolean that cannot say which." All of that still holds — this
+  is still an `Ecto.Enum` of two values, resolved in a changeset, with no database
+  CHECK and no third value.
+
+  What a later migration added is the possibility of **no** state, which is a
+  different statement from a third one: it says the row is not a fact about the
+  mailbox at all. Only `unsubscribe_changeset/2` can write one, and it never casts
+  `state`, so "a row with no state" and "a row written by the unsubscribe
+  endpoint" are the same row. `Courier.Suppressions.state/1` has folded that case
+  to `nil` since before the column was nullable, and `suppressed?/1` and `find/1`
+  filter on it already.
+
+  ## The two columns a provider does not fill in
+
+  `notification_type` and `user_id` are both nullable and both are set **only** by
+  an unsubscribe, which is a report about an address that courier wrote itself
+  rather than one a provider sent:
+
+    * **`notification_type` is what makes a row an instruction rather than a
+      fact.** RFC 8058's one-click unsubscribe stops ONE kind of mail. A bounce
+      and a complaint carry a `state` and stop all of it, because they are facts
+      about the mailbox; an unsubscribe carries **no state at all** — `nil` is the
+      whole mechanism — and is read back by
+      `Courier.Suppressions.unsubscribed?/2` against this column. `Courier.
+      Unsubscribes` is where that argument is made in full; the migration's
+      comment is where the consequence is, which is that a *stateful* unsubscribe
+      row would mean a person who stops receiving product updates can no longer
+      reset their password.
+    * **`user_id` is the attribution a provider cannot give.** A bounce report
+      names an address and nobody upstream knows which person it belongs to; a row
+      that guessed would put a stranger's uuid on a fact about a mailbox. An
+      unsubscribe is different — courier minted the token when it sent the message,
+      so it knows, and core's `courier.notification.suppressed` schema requires the
+      user as the envelope's subject. It is here so the row is interpretable on its
+      own rather than only by joining to a token.
+
   ## What is deliberately absent
 
   There is no column for the provider's payload. A bounce report carries
@@ -23,7 +64,8 @@ defmodule Courier.Suppression do
   acts on are the four it stores. A schema that had a `payload` map would be a
   copy of somebody's inbox held for no operational reason, and
   `Courier.SuppressionsTest` asserts the field list so adding one is a decision
-  somebody reads.
+  somebody reads. The two above are the exceptions, and each is a fact courier
+  knows rather than a fact somebody reported.
   """
 
   use Ecto.Schema
@@ -66,6 +108,11 @@ defmodule Courier.Suppression do
     field :message_id, :string
     field :occurred_at, :utc_datetime_usec
 
+    # The two an unsubscribe fills in and a provider never can. See the moduledoc;
+    # `state` staying nil on such a row is the load-bearing half.
+    field :notification_type, :string
+    field :user_id, Ecto.UUID
+
     timestamps(type: :utc_datetime_usec)
   end
 
@@ -107,6 +154,49 @@ defmodule Courier.Suppression do
     # Matched BY NAME rather than on `:unique`, for the reason
     # `Courier.Idempotency.refusal/1` gives: a future unique index on this table
     # must not be able to silently become a refusal courier is asking about.
+    |> unique_constraint([:provider, :provider_event_id],
+      name: :email_suppressions_provider_idempotency_index
+    )
+  end
+
+  @doc """
+  The changeset for a **one-click unsubscribe** (RFC 8058), which is the same
+  table written by courier rather than by a provider.
+
+  **The difference from `changeset/2` is one line that is not there**: `state` is
+  neither cast nor required. Everything else — the normalisation of the address,
+  the format check, the three length bounds, the unique index on
+  `(provider, provider_event_id)` — is the same function for the same reasons, and
+  the two changesets are kept apart rather than merged behind a flag because a
+  `state`-carrying row and a `state`-less one are different facts about a mailbox
+  and a caller that could ask for either by passing an option would eventually ask
+  for the wrong one.
+
+  Why a state-less row is the whole mechanism rather than a detail: a bounce and a
+  complaint are facts about the mailbox and refuse every notification type courier
+  sends, and an unsubscribe is an instruction about ONE type. `Courier.Deliver`
+  consults this table for a password reset as firmly as it does for a newsletter,
+  so a `:suppressed` state here would be a person who stops receiving product
+  updates and then cannot reset their password. A `nil` state is invisible to the
+  fold in `Courier.Suppressions.state/1` — the same way a soft bounce records
+  nothing — and visible to `Courier.Suppressions.unsubscribed?/2`.
+
+  `user_id` is put rather than cast, for the reason `changeset/2` puts
+  `email`: the value comes from the token courier minted, and nothing about a
+  request should be able to choose whose answer this is.
+  """
+  def unsubscribe_changeset(suppression, attrs) do
+    suppression
+    |> cast(attrs, [:email, :provider, :provider_event_id, :reason, :notification_type, :user_id])
+    |> validate_required([:email, :provider, :provider_event_id, :notification_type])
+    |> put_change(:email, normalize_email(attrs))
+    |> validate_email()
+    |> validate_length(:reason, max: @reason_length)
+    |> validate_length(:provider_event_id, max: @provider_event_id_length)
+    # The SAME index and matched by the SAME name. The unsubscribe is idempotent
+    # because of this constraint and nothing else, exactly as a redelivered report
+    # is — and a second index or a second name would be two mechanisms for one
+    # property.
     |> unique_constraint([:provider, :provider_event_id],
       name: :email_suppressions_provider_idempotency_index
     )

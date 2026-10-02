@@ -28,6 +28,17 @@ defmodule Courier.Mailers do
   rather than a mail with a hole in it: a reset mail with no link, or an
   invitation with nobody to attribute it to, is noise in a person's inbox.
 
+  ## Bulk and transactional, and who decides
+
+  Every type is also a **kind**, and the kind is what decides whether the message
+  may carry `List-Unsubscribe` and `List-Unsubscribe-Post` — the headers Gmail and
+  Yahoo require of bulk senders and the ones RFC 8058 defines the one-click POST
+  for. `kinds/0` is the whole of that decision, it is closed over `types/0`, and
+  it is **not** something a caller, a request body, or an operator's configuration
+  can set. See the comment on the table for why the default is
+  `:transactional`, and `Courier.Unsubscribes` for what the header does when it is
+  present.
+
   ## Configuration
 
   The sender and the subject lines are configuration
@@ -63,9 +74,57 @@ defmodule Courier.Mailers do
   @typedoc "The notification types courier sends, and no others."
   @type type :: String.t()
 
+  @typedoc """
+  What a message is for, which is not the same question as what it is called.
+
+  `:transactional` is mail the recipient cannot meaningfully refuse: a password
+  reset they asked for, a verification of an account they just made, an
+  invitation to a team somebody put them on. `:bulk` is mail a person subscribed
+  to and can stop receiving.
+  """
+  @type kind :: :transactional | :bulk
+
   @fields ~w(user_id email name url account_name invited_by role)a
   @payload_types Map.new(@fields, &{&1, :string})
   @types ~w(welcome password_reset team_invitation)
+
+  # **The kind of every type courier sends, and nothing else.** This table is the
+  # deliverability gate's input and it is here — in the module that composes the
+  # mail, not in configuration, not in a request body, and not in the provider —
+  # because the question "may this message carry an unsubscribe link?" has to have
+  # exactly one answer in the codebase.
+  #
+  # **All three are `:transactional` today, and that is not a gap.** There is no
+  # bulk type in courier's catalog, and adding one is a change in **core**, not
+  # here: every payload courier publishes carries `notification_type`, and
+  # `core/schemas/events/courier/email/*.schema.json` freezes that field to an
+  # enum of exactly these three names. A fourth type in this list would put a
+  # value on the bus that four payload schemas reject. So the switch is one row
+  # here plus one enum value in core, and `Courier.MailersTest` asserts the table
+  # covers `types/0` so neither half can be forgotten.
+  #
+  # **The default for a type with no row is `:transactional`,** and the direction
+  # of that default is the whole decision. A new type nobody classified would
+  # otherwise carry an unsubscribe link, and an account-management email with one
+  # is its own defect: a person who resets their password and then finds an
+  # unsubscribe link has learned that the link does something they did not expect,
+  # and the remedy courier can offer them is a support ticket. Failing towards "no
+  # header" is the direction a person notices; failing towards "header" is the
+  # direction they do not notice until they need the mail.
+  # A LIST OF PAIRS and not a map, and the reason is the compiler rather than
+  # the reader. Every value in this table is `:transactional` today, so a map
+  # literal gives the type checker `%{String.t() => :transactional}` and it then
+  # correctly reports that an arm matching `:bulk` can never run — right about the
+  # literal, wrong about the code, because the union is declared in the spec of
+  # `kind/1` and the table is where a bulk row will be added. `List.keyfind/3`
+  # returns something the checker cannot narrow, so the union survives. This is
+  # written down because the "simplification" back to a map is invisible in a
+  # diff and turns the gate red.
+  @kinds [
+    {"welcome", :transactional},
+    {"password_reset", :transactional},
+    {"team_invitation", :transactional}
+  ]
 
   @doc """
   Every notification type courier sends, in the order the platform names them.
@@ -75,6 +134,46 @@ defmodule Courier.Mailers do
   """
   @spec types() :: [type()]
   def types, do: @types
+
+  @doc """
+  Every type courier sends, paired with what it is for.
+
+  Keys are `types/0`, always — asserted in `Courier.MailersTest`, because a table
+  that had fallen behind the catalog would classify nothing and default
+  everything, and a default that happens to be right is a default nothing checked.
+  """
+  @spec kinds() :: %{type() => kind()}
+  def kinds, do: Map.new(@kinds)
+
+  @doc """
+  What `type` is for, and therefore whether it may carry `List-Unsubscribe`.
+
+  `:transactional` for a type with no row in the table, on the terms the table's
+  comment gives. The default is the safe direction and it is a default rather than
+  a refusal: `build/2` has already refused a type courier does not send before
+  anything asks this, so the only inputs that reach it are types in `types/0` —
+  and if the table ever falls behind, a refusal here would take down a send that
+  would otherwise be fine.
+  """
+  @spec kind(atom() | type()) :: kind()
+  def kind(type) do
+    case List.keyfind(@kinds, to_string(type), 0) do
+      {_name, kind} when kind in [:transactional, :bulk] -> kind
+      _no_row -> :transactional
+    end
+  end
+
+  @doc """
+  Whether a message of `type` is bulk mail, and so carries the one-click
+  unsubscribe headers (`Courier.Unsubscribes.decorate/2`).
+  """
+  @spec bulk?(atom() | type()) :: boolean()
+  def bulk?(type) do
+    case kind(type) do
+      :bulk -> true
+      :transactional -> false
+    end
+  end
 
   @doc """
   The user a payload is about, or `nil` when it names none.
