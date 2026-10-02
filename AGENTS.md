@@ -891,6 +891,35 @@ configuration an operator can read, not in a constant inside a worker.
 five-minute window is a test that takes five minutes, and one that lowers the
 window to make it fast is a test that stopped checking the schedule.
 
+**A wait in a test is a claim about causality, and a bounded poll is not one.**
+`error_relay_test.exs` failed about one run in three for three separate workers
+before `courier-26b` and none of them caused it. The cause was one line — an
+`eventually/3` helper that polled two hundred times and gave up — and it is worth
+stating as a rule because the shape recurs. **A count of iterations is a proxy
+for a duration, and the proxy is only as good as the machine it ran on:** two
+hundred `:sys.get_state/1` round trips measured 0.6 ms to 2.2 ms of wall clock on
+the same code on the same test, while the thing being waited for arrived 0.4 ms
+to 36 ms later. Whichever was bigger won. So the wait has to be chosen by **who
+writes the fact being asserted**, and there are exactly three answers:
+
+  * **the process under test writes it** — `:sys.get_state/1`. A barrier, not a
+    wait: the cast is ahead of the system message in the mailbox.
+  * **a process one cast deeper writes it** — `:sys.get_state/1` on that process
+    too, and the ordering of the two calls is the argument. This one is still a
+    **race against scheduling latency**: measured, it returns before the work is
+    done in 13%–25% of rounds on a machine at load average 30.
+  * **a `Task` writes it** — `Process.monitor/1` and `assert_receive` on the
+    `:DOWN`. The drain cannot exit before it has written its counters, so
+    observing the exit observes the write. Measured 0 misses in 180 rounds where
+    the `:sys.get_state` version missed 34.
+
+A poll is not always wrong, but **a test must never assert on silence** — "nothing
+arrived within the window" is a claim about the scheduler, not about the code.
+`assert` on the counter the process itself increments, after a barrier, and the
+counter and the messages bound each other. `courier-26b` reports the before and
+after numbers, the mutation that proves the assertion still bites, and the two
+other places in this suite that carry the same risk.
+
 **An authorization decision is a 404, not a 403, for anything the caller cannot
 see.** Core's `docs/openapi-conventions.md` says 403 "leaks existence". The
 account comes from `conn.assigns.current_account`, never from a request body —
