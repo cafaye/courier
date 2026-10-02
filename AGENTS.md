@@ -234,7 +234,8 @@ bin/dev                               kit's, verbatim: fetch kit.ref, merge, up
 .github/workflows/ci.yml              calls kit's workflow, plus gate and release
 Dockerfile                            two-stage release build, slim final stage
 docker-compose.yml                    an OVERRIDE on kit's stack: the courier
-                                      service, its database, and the crash layer
+                                      service, its database and role on the
+                                      SHARED cluster, and the crash layer
 rel/overlays/bin/server               the release entrypoint the image runs
 rel/overlays/bin/migrate              the release's migration entrypoint
 ```
@@ -1206,8 +1207,16 @@ needs — so the requirement is measured rather than asserted about a comment.
 ## Toolchain
 
 mise, from `mise.toml`: `mise install`, then `mise run prime` for the gate.
-For container work: `docker compose up --build` starts postgres:17-alpine and the
-release image, and `docker compose down -v` throws the volume away.
+For container work: `bin/dev` brings up the **shared** kit postgres cluster
+(`kit-postgres:17`, one database and one role per service) with the release
+image, and `bin/dev down` stops it keeping every volume. `bin/dev nuke` is the
+only destructive step, and since the cluster is shared it now discards every
+service's data in it, not courier's alone.
+
+`docker compose up --build` on its own no longer works, and that is the point:
+courier's `docker-compose.yml` is an **override**, not a stack. Read alone it
+has no network and no `depends_on`, and `bin/dev` is what merges it with the
+pinned kit stack (`kit.ref`) to produce a runnable one.
 
 ## Generated rules
 

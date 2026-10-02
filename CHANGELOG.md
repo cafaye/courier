@@ -331,6 +331,46 @@ document lands in both files in one commit, because core asserts the two agree.
 
 ### Changed
 
+- **courier runs on the platform's ONE shared postgres cluster, as a tenant of
+  it.** The previous entry below describes the state this one replaces, so it is
+  left as written and this one says what is different.
+  - **`kit.ref` moves `a0959929` → `1770009`.** At the old pin
+    `templates/compose/postgres/` did not exist in kit at all, so there was no
+    cluster to join — only the one container kit shipped, which courier was
+    overriding into a private database by name. Nineteen kit commits come with
+    the bump; under `templates/compose/` the diff is `.env.example`,
+    `docker-compose.yml`, `otel-collector.yml` (four resource attributes
+    core-26 added, exempted on all three signals) and the whole of `postgres/`.
+  - **The database and the role are now declared, not impersonated.** The old
+    file overrode `POSTGRES_USER: courier` and `POSTGRES_DB: courier`, which made
+    courier the cluster's **superuser** — the role that owns the cluster, reads
+    every database in it, and creates roles. Measured on the shared stack before
+    this change: that role answered a query against a sibling service's database
+    with its rows. It now declares `KIT_POSTGRES_DATABASES: courier` and nothing
+    else, so kit's `initdb/10-cluster.sh` creates `courier` as
+    `LOGIN NOSUPERUSER` owning a database of the same name, and applies
+    `REVOKE ALL ON DATABASE … FROM PUBLIC` to every database in the cluster.
+    Measured after: `has_database_privilege('public', <other service>, 'CONNECT')`
+    is false for all of them, and courier's own connection to a sibling's
+    database fails `FATAL: permission denied for database` /
+    `User does not have CONNECT privilege`.
+  - **`KIT_POSTGRES_ROLE_CONNECTIONS` is 20, not kit's default 10.** courier's two
+    Oban queues and the web pool share one `Courier.Repo` pool; 11 connections at
+    rest and 11 peak measured, so at 10 the service cannot start. The limit lives
+    in the cluster's `pg_authid`, so on an **existing** volume raising it needs
+    kit's `bin/dev db grant` — `docker-entrypoint-initdb.d` runs once per volume
+    and a changed variable is not re-read.
+  - **Two lines exist only because of a kit bug, and both are commented as such
+    in the file.** kit's postgres service is the only one of its seven that uses
+    bare `./postgres` paths rather than `${KIT_COMPOSE_DIR:-.}/postgres`, so
+    courier re-points the build context and the initdb mount at the fetched tree.
+    Without them the build fails outright; with them the shared cluster is built
+    from kit's own Dockerfile and initialised by kit's own script.
+  - **courier now joins the `platform` network explicitly.** An override's
+    `networks` list replaces rather than merges, and courier's previous file
+    named none, so `docker compose config` rendered
+    `courier: {default: null}` against `postgres: {platform: null}` and the
+    daemon refused to start it.
 - **`docker-compose.yml` is an OVERRIDE on kit's stack, not a copy.** `kit.ref`
   pins the kit commit, `bin/dev` is kit's own script verbatim, and this
   repository's compose file owns three things: its database name and role, its

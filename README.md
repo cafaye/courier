@@ -16,7 +16,9 @@ mise run prime     # hex, deps, database, tests
 
 `bin/prime` is `mix local.hex --force && mix deps.get && mix ecto.setup && mix
 test`. It needs a Postgres at `localhost:5432` as `postgres`/`postgres` —
-`docker compose up -d db` if you do not have one.
+`bin/gate-db` if you do not have one. It does **not** use the shared cluster:
+kit publishes that on `${KIT_POSTGRES_PORT:-15500}` under the cluster's own
+credentials, and the gate must not run against a database the dev loop mutates.
 
 Before committing a change, `mix precommit`: warnings-as-errors, unused deps
 dropped from the lockfile, formatted, suite green.
@@ -181,17 +183,27 @@ that exclusion.
 
 ```sh
 mix phx.server                      # http://localhost:4000, dev config
-docker compose up --build           # postgres:17-alpine + the release image
+bin/dev                              # kit's shared cluster (kit-postgres:17) + the release image
 curl localhost:4000/healthz
-docker compose down -v              # stop and discard the volume
+bin/dev down                         # stop the stack; every volume is kept
 ```
 
-The compose stack runs the same release the platform will run. It has no
-migration step yet, because this repository has no migrations: the release
-ships the path — `bin/migrate`, which is `Courier.Release.migrate/0` — and it
-answers `Migrations already up`. Whoever adds the first migration decides
-whether compose grows a migrate service or the deploy pipeline calls
-`bin/migrate` directly.
+The compose stack runs the same release the platform will run. Its postgres is
+**kit's shared cluster**, not a courier-owned container: `bin/dev` merges the
+pinned kit stack with this repository's `docker-compose.yml`, and the cluster
+carries one database and one role per service — `courier` here, created as
+`LOGIN NOSUPERUSER` and refused at the door of every other service's database.
+
+Migrations are **not** part of `compose up`. The cluster creates an empty
+`courier` database and nothing else, so a fresh volume needs the release's own
+migration path run once against it — `rel/overlays/bin/migrate`, which is
+`Courier.Release.migrate/0`. `bin/dev` calls `bin/ecto.setup` for this, and note
+that it resolves to `mix ecto.create && mix ecto.migrate` on the **host**, which
+reads `config/dev.exs` (`postgres/postgres@localhost:5432/courier_dev`) and not
+the cluster; against the shared cluster, run the release's `bin/migrate` inside
+the container instead. `docker-entrypoint-initdb.d` runs **once per volume**, so
+adding a database to `KIT_POSTGRES_DATABASES` after the first boot does nothing
+to an existing cluster — `bin/dev db grant` prints the statements instead.
 
 ## Who is calling
 
@@ -259,7 +271,9 @@ bin/prime                                       the gate: deps, database, tests
 bin/assert-suite                                refuses a run that skipped the hard part
 bin/toolchain-pins                              the one toolchain pin, read from mise.toml
 Dockerfile                                      two-stage release build, slim final
-docker-compose.yml                              postgres:17-alpine + the release image
+docker-compose.yml                              an OVERRIDE on kit's stack: courier's
+                                               service, its database and role on
+                                               the shared cluster, the crash layer
 cafaye.yml                                      the manifest (draft, see below)
 ```
 

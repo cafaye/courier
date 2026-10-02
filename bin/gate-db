@@ -18,8 +18,8 @@
 #
 # So the host-side suite and the dev container are on different databases:
 #   * the dev container reaches courier's database over the compose network by
-#     service name (`ecto://courier:courier@postgres:5432/courier`), where no
-#     host port is involved at all — `bin/dev` is unaffected by any of this;
+#     service name, as the `courier` role and no other, where no host port is
+#     involved at all — `bin/dev` is unaffected by any of this;
 #   * the host-side suite needs a postgres on localhost:5432 as postgres/postgres,
 #     which is what this script starts.
 #
